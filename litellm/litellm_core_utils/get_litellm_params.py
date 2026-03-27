@@ -30,6 +30,7 @@ _OPTIONAL_KWARGS_KEYS = frozenset(
         "aws_sts_endpoint",
         "aws_external_id",
         "aws_bedrock_runtime_endpoint",
+        "chatgpt_auth_profile",
         "tpm",
         "rpm",
     }

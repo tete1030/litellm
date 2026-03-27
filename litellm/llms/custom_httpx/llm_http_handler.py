@@ -2101,14 +2101,17 @@ class BaseLLMHTTPHandler:
         else:
             sync_httpx_client = client
 
+        merged_extra_headers = (
+            response_api_optional_request_params.get("extra_headers", {}) or {}
+        )
+        if extra_headers:
+            merged_extra_headers = {**merged_extra_headers, **extra_headers}
+
         headers = responses_api_provider_config.validate_environment(
-            headers=response_api_optional_request_params.get("extra_headers", {}) or {},
+            headers=merged_extra_headers,
             model=model,
             litellm_params=litellm_params,
         )
-
-        if extra_headers:
-            headers.update(extra_headers)
 
         # Check if streaming is requested
         stream = response_api_optional_request_params.get("stream", False)

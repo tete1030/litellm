@@ -2311,6 +2311,10 @@ class ConfigYAML(LiteLLMPydanticObjectBase):
         None,
         description="litellm router object settings. See router.py __init__ for all, example router.num_retries=5, router.timeout=5, router.max_retries=5, router.retry_after=5",
     )
+    chatgpt_auth_profiles: Optional[dict] = Field(
+        None,
+        description="Named ChatGPT OAuth profile registry. Each profile can define token_dir and/or auth_file for deployment-level chatgpt_auth_profile selection.",
+    )
 
     model_config = ConfigDict(protected_namespaces=())
 

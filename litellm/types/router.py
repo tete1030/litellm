@@ -182,6 +182,7 @@ class GenericLiteLLMParams(CredentialLiteLLMParams, CustomPricingLiteLLMParams):
     organization: Optional[str] = None  # for openai orgs
     configurable_clientside_auth_params: CONFIGURABLE_CLIENTSIDE_AUTH_PARAMS = None
     litellm_credential_name: Optional[str] = None
+    chatgpt_auth_profile: Optional[str] = None
 
     ## LOGGING PARAMS ##
     litellm_trace_id: Optional[str] = None
@@ -297,6 +298,7 @@ class updateDeployment(BaseModel):
 class LiteLLMParamsTypedDict(TypedDict, total=False):
     model: str
     custom_llm_provider: Optional[str]
+    chatgpt_auth_profile: Optional[str]
     tpm: Optional[int]
     rpm: Optional[int]
     order: Optional[int]

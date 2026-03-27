@@ -232,6 +232,10 @@ from litellm.litellm_core_utils.credential_accessor import CredentialAccessor
 from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLoggingObj
 from litellm.litellm_core_utils.sensitive_data_masker import SensitiveDataMasker
 from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler, HTTPHandler
+from litellm.llms.chatgpt.authenticator import (
+    normalize_chatgpt_auth_profiles,
+    resolve_chatgpt_auth_profile,
+)
 from litellm.llms.vertex_ai.vertex_llm_base import VertexBase
 from litellm.proxy._experimental.mcp_server.byok_oauth_endpoints import (
     router as mcp_byok_oauth_router,
@@ -2635,6 +2639,46 @@ class ProxyConfig:
             credential_list = [CredentialItem(**cred) for cred in credential_list_dict]
         return credential_list
 
+    def load_chatgpt_auth_profiles(self, config: dict) -> Dict[str, Dict[str, str]]:
+        """
+        Load and validate named ChatGPT OAuth auth profiles from config.
+        """
+        profile_registry = config.get("chatgpt_auth_profiles")
+        return normalize_chatgpt_auth_profiles(profile_registry)
+
+    def validate_chatgpt_auth_profile_references(
+        self,
+        model_list: Optional[List[dict]],
+        chatgpt_auth_profiles: Dict[str, Dict[str, str]],
+    ) -> None:
+        if not model_list:
+            return
+
+        for deployment in model_list:
+            litellm_params = deployment.get("litellm_params") or {}
+            if not isinstance(litellm_params, dict):
+                continue
+            model = litellm_params.get("model")
+            if not isinstance(model, str) or not model.startswith("chatgpt/"):
+                continue
+            profile_name = litellm_params.get("chatgpt_auth_profile")
+            if profile_name in (None, ""):
+                profile_name = None
+            try:
+                resolve_chatgpt_auth_profile(
+                    litellm_params=litellm_params,
+                    profile_name=profile_name,
+                )
+            except Exception as exc:
+                raise ValueError(
+                    "Invalid chatgpt_auth_profile '{}' referenced by deployment '{}' for model '{}': {}".format(
+                        profile_name or "default",
+                        deployment.get("model_name", model),
+                        model,
+                        exc,
+                    )
+                ) from exc
+
     def parse_search_tools(self, config: dict) -> Optional[List[SearchToolTypedDict]]:
         """
         Parse and validate search tools from config.
@@ -3339,6 +3383,12 @@ class ProxyConfig:
         ## CREDENTIALS
         credential_list_dict = self.load_credential_list(config=config)
         litellm.credential_list = credential_list_dict
+        chatgpt_auth_profiles = self.load_chatgpt_auth_profiles(config=config)
+        litellm.chatgpt_auth_profiles = chatgpt_auth_profiles
+        self.validate_chatgpt_auth_profile_references(
+            model_list=config.get("model_list"),
+            chatgpt_auth_profiles=chatgpt_auth_profiles,
+        )
 
         ## NON-LLM CONFIGS eg. MCP tools, vector stores, etc.
         await self._init_non_llm_configs(config=config)

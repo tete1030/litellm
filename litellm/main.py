@@ -1633,6 +1633,13 @@ def completion(  # type: ignore # noqa: PLR0915
                 optional_params = dict(optional_params)
                 optional_params["reasoning_effort"] = reasoning_effort
 
+            if custom_llm_provider == "chatgpt":
+                from litellm.llms.chatgpt.authenticator import (
+                    get_chatgpt_authenticator,
+                )
+
+                api_key = get_chatgpt_authenticator(litellm_params).get_access_token()
+
             return responses_api_bridge.completion(
                 model=model,
                 messages=messages,
@@ -2436,6 +2443,13 @@ def completion(  # type: ignore # noqa: PLR0915
                 or litellm.openai_key
                 or get_secret("OPENAI_API_KEY")
             )
+
+            if custom_llm_provider == "chatgpt":
+                from litellm.llms.chatgpt.authenticator import (
+                    get_chatgpt_authenticator,
+                )
+
+                api_key = get_chatgpt_authenticator(litellm_params).get_access_token()
 
             headers = headers or litellm.headers
 

@@ -1,11 +1,15 @@
 import base64
 import json
 import os
+import tempfile
+import threading
 import time
+from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 import httpx
 
+import litellm
 from litellm._logging import verbose_logger
 from litellm.llms.custom_httpx.http_handler import _get_httpx_client
 
@@ -17,6 +21,7 @@ from .common_utils import (
     CHATGPT_DEVICE_TOKEN_URL,
     CHATGPT_DEVICE_VERIFY_URL,
     CHATGPT_OAUTH_TOKEN_URL,
+    ChatGPTAuthProfileError,
     GetAccessTokenError,
     GetDeviceCodeError,
     RefreshAccessTokenError,
@@ -26,17 +31,291 @@ TOKEN_EXPIRY_SKEW_SECONDS = 60
 DEVICE_CODE_TIMEOUT_SECONDS = 15 * 60
 DEVICE_CODE_COOLDOWN_SECONDS = 5 * 60
 DEVICE_CODE_POLL_SLEEP_SECONDS = 5
+DEFAULT_CHATGPT_PROFILE_NAME = "default"
+DEFAULT_CHATGPT_TOKEN_DIR = os.path.expanduser("~/.config/litellm/chatgpt")
+DEFAULT_CHATGPT_AUTH_FILE = "auth.json"
+CHATGPT_AUTH_PROFILES_ENV_VARS = (
+    "CHATGPT_AUTH_PROFILES_JSON",
+    "CHATGPT_AUTH_PROFILES",
+)
+
+_AUTHENTICATOR_CACHE: Dict[str, "Authenticator"] = {}
+_AUTHENTICATOR_CACHE_LOCK = threading.Lock()
+_PROFILE_LOCKS: Dict[str, threading.RLock] = {}
+_PROFILE_LOCKS_LOCK = threading.Lock()
+
+
+@dataclass(frozen=True)
+class ResolvedChatGPTAuthProfile:
+    profile_name: str
+    token_dir: str
+    auth_file: str
+    cache_key: str
+
+
+def _normalize_path(path: str) -> str:
+    return os.path.abspath(os.path.expanduser(path))
+
+
+def _get_default_token_dir() -> str:
+    return _normalize_path(os.getenv("CHATGPT_TOKEN_DIR", DEFAULT_CHATGPT_TOKEN_DIR))
+
+
+def _get_default_auth_file_name() -> str:
+    auth_file_name = os.getenv("CHATGPT_AUTH_FILE", DEFAULT_CHATGPT_AUTH_FILE)
+    return auth_file_name or DEFAULT_CHATGPT_AUTH_FILE
+
+
+def _get_profile_default_auth_file_name(profile_name: str) -> str:
+    if profile_name == DEFAULT_CHATGPT_PROFILE_NAME:
+        return _get_default_auth_file_name()
+    return DEFAULT_CHATGPT_AUTH_FILE
+
+
+def _normalize_litellm_params(litellm_params: Optional[Any]) -> Dict[str, Any]:
+    if litellm_params is None:
+        return {}
+    if isinstance(litellm_params, dict):
+        return dict(litellm_params)
+    if hasattr(litellm_params, "model_dump"):
+        try:
+            return litellm_params.model_dump()
+        except Exception:
+            return {}
+    if hasattr(litellm_params, "dict"):
+        try:
+            return litellm_params.dict()
+        except Exception:
+            return {}
+    return {}
+
+
+def get_chatgpt_auth_profile_name(litellm_params: Optional[Any]) -> str:
+    params = _normalize_litellm_params(litellm_params)
+    profile_name = params.get("chatgpt_auth_profile")
+    if profile_name is None:
+        return DEFAULT_CHATGPT_PROFILE_NAME
+    profile_name = str(profile_name).strip()
+    return profile_name or DEFAULT_CHATGPT_PROFILE_NAME
+
+
+def _load_chatgpt_auth_profiles_from_env() -> Dict[str, Any]:
+    raw_profiles: Optional[str] = None
+    for env_var in CHATGPT_AUTH_PROFILES_ENV_VARS:
+        value = os.getenv(env_var)
+        if value:
+            raw_profiles = value
+            break
+    if not raw_profiles:
+        return {}
+    try:
+        parsed_profiles = json.loads(raw_profiles)
+    except json.JSONDecodeError as exc:
+        raise ChatGPTAuthProfileError(
+            status_code=400,
+            message=f"Invalid ChatGPT auth profile registry in environment: {exc}",
+        ) from exc
+    if not isinstance(parsed_profiles, dict):
+        raise ChatGPTAuthProfileError(
+            status_code=400,
+            message="ChatGPT auth profile registry must be a JSON object keyed by profile name.",
+        )
+    return parsed_profiles
+
+
+def _get_chatgpt_auth_profile_registry() -> Dict[str, Any]:
+    env_profiles = _load_chatgpt_auth_profiles_from_env()
+    configured_profiles = getattr(litellm, "chatgpt_auth_profiles", {}) or {}
+    if configured_profiles and not isinstance(configured_profiles, dict):
+        raise ChatGPTAuthProfileError(
+            status_code=400,
+            message="litellm.chatgpt_auth_profiles must be a dictionary keyed by profile name.",
+        )
+    merged_profiles: Dict[str, Any] = {}
+    merged_profiles.update(env_profiles)
+    merged_profiles.update(configured_profiles)
+    return normalize_chatgpt_auth_profiles(merged_profiles)
+
+
+def _resolve_profile_definition(
+    profile_name: str,
+    profile_definition: Any,
+) -> ResolvedChatGPTAuthProfile:
+    if not isinstance(profile_definition, dict):
+        raise ChatGPTAuthProfileError(
+            status_code=400,
+            message=(
+                f"ChatGPT auth profile '{profile_name}' must map to an object with "
+                "'token_dir' and/or 'auth_file'."
+            ),
+        )
+
+    raw_token_dir = profile_definition.get("token_dir")
+    raw_auth_file = profile_definition.get("auth_file")
+
+    token_dir: Optional[str] = None
+    if raw_token_dir is not None:
+        token_dir = _normalize_path(str(raw_token_dir))
+
+    auth_file: Optional[str] = None
+    if raw_auth_file is not None:
+        auth_file_str = str(raw_auth_file)
+        if os.path.isabs(auth_file_str):
+            auth_file = _normalize_path(auth_file_str)
+        elif token_dir is not None:
+            auth_file = _normalize_path(os.path.join(token_dir, auth_file_str))
+        else:
+            raise ChatGPTAuthProfileError(
+                status_code=400,
+                message=(
+                    f"ChatGPT auth profile '{profile_name}' defines a relative auth_file "
+                    "but no token_dir."
+                ),
+            )
+
+    if token_dir is None and auth_file is not None:
+        token_dir = os.path.dirname(auth_file)
+
+    if token_dir is None:
+        if profile_name == DEFAULT_CHATGPT_PROFILE_NAME:
+            token_dir = _get_default_token_dir()
+        else:
+            raise ChatGPTAuthProfileError(
+                status_code=400,
+                message=(
+                    f"ChatGPT auth profile '{profile_name}' must define 'token_dir' "
+                    "or 'auth_file'."
+                ),
+            )
+
+    if auth_file is None:
+        auth_file = _normalize_path(
+            os.path.join(token_dir, _get_profile_default_auth_file_name(profile_name))
+        )
+
+    return ResolvedChatGPTAuthProfile(
+        profile_name=profile_name,
+        token_dir=token_dir,
+        auth_file=auth_file,
+        cache_key=auth_file,
+    )
+
+
+def resolve_chatgpt_auth_profile(
+    litellm_params: Optional[Any] = None,
+    profile_name: Optional[str] = None,
+) -> ResolvedChatGPTAuthProfile:
+    requested_profile = (
+        profile_name or get_chatgpt_auth_profile_name(litellm_params)
+    ).strip()
+    if not requested_profile:
+        requested_profile = DEFAULT_CHATGPT_PROFILE_NAME
+
+    profile_registry = _get_chatgpt_auth_profile_registry()
+    if requested_profile in profile_registry:
+        return _resolve_profile_definition(
+            profile_name=requested_profile,
+            profile_definition=profile_registry[requested_profile],
+        )
+
+    if requested_profile == DEFAULT_CHATGPT_PROFILE_NAME:
+        return _resolve_profile_definition(
+            profile_name=DEFAULT_CHATGPT_PROFILE_NAME,
+            profile_definition={},
+        )
+
+    raise ChatGPTAuthProfileError(
+        status_code=400,
+        message=(
+            f"Unknown ChatGPT auth profile '{requested_profile}'. Define it under "
+            "'chatgpt_auth_profiles' or CHATGPT_AUTH_PROFILES_JSON."
+        ),
+    )
+
+
+def normalize_chatgpt_auth_profiles(
+    profile_registry: Optional[Dict[str, Any]],
+) -> Dict[str, Dict[str, str]]:
+    if not profile_registry:
+        return {}
+    if not isinstance(profile_registry, dict):
+        raise ChatGPTAuthProfileError(
+            status_code=400,
+            message="chatgpt_auth_profiles must be a dictionary keyed by profile name.",
+        )
+
+    normalized_profiles: Dict[str, Dict[str, str]] = {}
+    resolved_auth_files: Dict[str, str] = {}
+    for profile_name, profile_definition in profile_registry.items():
+        resolved = _resolve_profile_definition(str(profile_name), profile_definition)
+        existing_profile = resolved_auth_files.get(resolved.auth_file)
+        if existing_profile is not None:
+            raise ChatGPTAuthProfileError(
+                status_code=400,
+                message=(
+                    "ChatGPT auth profiles '{}' and '{}' resolve to the same auth_file '{}'. "
+                    "Each profile must use an isolated auth file."
+                ).format(existing_profile, resolved.profile_name, resolved.auth_file),
+            )
+        resolved_auth_files[resolved.auth_file] = resolved.profile_name
+        normalized_profiles[resolved.profile_name] = {
+            "token_dir": resolved.token_dir,
+            "auth_file": resolved.auth_file,
+        }
+
+    if DEFAULT_CHATGPT_PROFILE_NAME not in normalized_profiles:
+        default_profile = _resolve_profile_definition(
+            DEFAULT_CHATGPT_PROFILE_NAME, {}
+        )
+        existing_profile = resolved_auth_files.get(default_profile.auth_file)
+        if existing_profile is not None:
+            raise ChatGPTAuthProfileError(
+                status_code=400,
+                message=(
+                    "ChatGPT auth profile '{}' resolves to the same auth_file '{}' as the implicit "
+                    "default profile. Each profile must use an isolated auth file."
+                ).format(existing_profile, default_profile.auth_file),
+            )
+    return normalized_profiles
+
+
+def _get_profile_lock(cache_key: str) -> threading.RLock:
+    with _PROFILE_LOCKS_LOCK:
+        lock = _PROFILE_LOCKS.get(cache_key)
+        if lock is None:
+            lock = threading.RLock()
+            _PROFILE_LOCKS[cache_key] = lock
+        return lock
+
+
+def get_chatgpt_authenticator(litellm_params: Optional[Any] = None) -> "Authenticator":
+    resolved_profile = resolve_chatgpt_auth_profile(litellm_params=litellm_params)
+    with _AUTHENTICATOR_CACHE_LOCK:
+        authenticator = _AUTHENTICATOR_CACHE.get(resolved_profile.cache_key)
+        if authenticator is None:
+            authenticator = Authenticator(profile=resolved_profile)
+            _AUTHENTICATOR_CACHE[resolved_profile.cache_key] = authenticator
+        return authenticator
+
+
+def reset_chatgpt_authenticator_cache() -> None:
+    with _AUTHENTICATOR_CACHE_LOCK:
+        _AUTHENTICATOR_CACHE.clear()
+    with _PROFILE_LOCKS_LOCK:
+        _PROFILE_LOCKS.clear()
 
 
 class Authenticator:
-    def __init__(self) -> None:
-        self.token_dir = os.getenv(
-            "CHATGPT_TOKEN_DIR",
-            os.path.expanduser("~/.config/litellm/chatgpt"),
-        )
-        self.auth_file = os.path.join(
-            self.token_dir, os.getenv("CHATGPT_AUTH_FILE", "auth.json")
-        )
+    def __init__(
+        self,
+        profile_name: Optional[str] = None,
+        profile: Optional[ResolvedChatGPTAuthProfile] = None,
+    ) -> None:
+        self.profile = profile or resolve_chatgpt_auth_profile(profile_name=profile_name)
+        self.profile_name = self.profile.profile_name
+        self.token_dir = self.profile.token_dir
+        self.auth_file = self.profile.auth_file
+        self._lock = _get_profile_lock(self.profile.cache_key)
         self._ensure_token_dir()
 
     def get_api_base(self) -> str:
@@ -46,30 +325,67 @@ class Authenticator:
             or CHATGPT_API_BASE
         )
 
+    def _get_valid_access_token_from_auth_data(
+        self, auth_data: Optional[Dict[str, Any]]
+    ) -> Optional[str]:
+        if not auth_data:
+            return None
+        access_token = auth_data.get("access_token")
+        if access_token and not self._is_token_expired(auth_data, access_token):
+            return access_token
+        return None
+
     def get_access_token(self) -> str:
         auth_data = self._read_auth_file()
-        if auth_data:
-            access_token = auth_data.get("access_token")
-            if access_token and not self._is_token_expired(auth_data, access_token):
+        access_token = self._get_valid_access_token_from_auth_data(auth_data)
+        if access_token:
+            return access_token
+
+        with self._lock:
+            auth_data = self._read_auth_file()
+            access_token = self._get_valid_access_token_from_auth_data(auth_data)
+            if access_token:
                 return access_token
-            refresh_token = auth_data.get("refresh_token")
+
+            refresh_token = auth_data.get("refresh_token") if auth_data else None
             if refresh_token:
                 try:
                     refreshed = self._refresh_tokens(refresh_token)
                     return refreshed["access_token"]
                 except RefreshAccessTokenError as exc:
                     verbose_logger.warning(
-                        "ChatGPT refresh token failed, re-login required: %s", exc
+                        "ChatGPT refresh token failed for profile '%s', re-login required: %s",
+                        self.profile_name,
+                        exc,
                     )
 
-        cooldown_remaining = self._get_device_code_cooldown_remaining(auth_data)
+            cooldown_remaining = self._get_device_code_cooldown_remaining(auth_data)
+
         if cooldown_remaining > 0:
             token = self._wait_for_access_token(cooldown_remaining)
             if token:
                 return token
 
-        tokens = self._login_device_code()
-        return tokens["access_token"]
+        with self._lock:
+            auth_data = self._read_auth_file()
+            access_token = self._get_valid_access_token_from_auth_data(auth_data)
+            if access_token:
+                return access_token
+
+            refresh_token = auth_data.get("refresh_token") if auth_data else None
+            if refresh_token:
+                try:
+                    refreshed = self._refresh_tokens(refresh_token)
+                    return refreshed["access_token"]
+                except RefreshAccessTokenError as exc:
+                    verbose_logger.warning(
+                        "ChatGPT refresh token failed for profile '%s', re-login required: %s",
+                        self.profile_name,
+                        exc,
+                    )
+
+            tokens = self._login_device_code()
+            return tokens["access_token"]
 
     def get_account_id(self) -> Optional[str]:
         auth_data = self._read_auth_file()
@@ -82,30 +398,90 @@ class Authenticator:
         access_token = auth_data.get("access_token")
         derived = self._extract_account_id(id_token or access_token)
         if derived:
-            auth_data["account_id"] = derived
-            self._write_auth_file(auth_data)
+            with self._lock:
+                latest_auth_data = self._read_auth_file() or {}
+                if latest_auth_data.get("account_id"):
+                    return latest_auth_data["account_id"]
+                latest_auth_data["account_id"] = derived
+                self._write_auth_file(latest_auth_data)
         return derived
 
     def _ensure_token_dir(self) -> None:
-        if not os.path.exists(self.token_dir):
+        try:
             os.makedirs(self.token_dir, exist_ok=True)
+        except OSError as exc:
+            raise ChatGPTAuthProfileError(
+                status_code=500,
+                message=(
+                    f"ChatGPT auth profile '{self.profile_name}' could not create token "
+                    f"directory '{self.token_dir}': {exc}"
+                ),
+            ) from exc
 
     def _read_auth_file(self) -> Optional[Dict[str, Any]]:
         try:
             with open(self.auth_file, "r") as f:
                 return json.load(f)
-        except IOError:
+        except FileNotFoundError:
             return None
         except json.JSONDecodeError as exc:
-            verbose_logger.warning("Invalid ChatGPT auth file: %s", exc)
-            return None
+            raise ChatGPTAuthProfileError(
+                status_code=500,
+                message=(
+                    f"Invalid ChatGPT auth file for profile '{self.profile_name}' at "
+                    f"'{self.auth_file}': {exc}"
+                ),
+            ) from exc
+        except OSError as exc:
+            raise ChatGPTAuthProfileError(
+                status_code=500,
+                message=(
+                    f"Failed reading ChatGPT auth file for profile '{self.profile_name}' at "
+                    f"'{self.auth_file}': {exc}"
+                ),
+            ) from exc
 
     def _write_auth_file(self, data: Dict[str, Any]) -> None:
+        auth_dir = os.path.dirname(self.auth_file) or self.token_dir
+        self._ensure_token_dir()
         try:
-            with open(self.auth_file, "w") as f:
-                json.dump(data, f)
-        except IOError as exc:
-            verbose_logger.error("Failed to write ChatGPT auth file: %s", exc)
+            os.makedirs(auth_dir, exist_ok=True)
+        except OSError as exc:
+            raise ChatGPTAuthProfileError(
+                status_code=500,
+                message=(
+                    f"ChatGPT auth profile '{self.profile_name}' could not create auth "
+                    f"directory '{auth_dir}': {exc}"
+                ),
+            ) from exc
+        temp_file_path: Optional[str] = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                dir=auth_dir,
+                prefix="auth-",
+                suffix=".tmp",
+                delete=False,
+            ) as temp_file:
+                json.dump(data, temp_file)
+                temp_file.flush()
+                os.fsync(temp_file.fileno())
+                temp_file_path = temp_file.name
+            os.replace(temp_file_path, self.auth_file)
+        except OSError as exc:
+            raise ChatGPTAuthProfileError(
+                status_code=500,
+                message=(
+                    f"Failed writing ChatGPT auth file for profile '{self.profile_name}' at "
+                    f"'{self.auth_file}': {exc}"
+                ),
+            ) from exc
+        finally:
+            if temp_file_path and os.path.exists(temp_file_path):
+                try:
+                    os.unlink(temp_file_path)
+                except OSError:
+                    pass
 
     def _is_token_expired(self, auth_data: Dict[str, Any], access_token: str) -> bool:
         expires_at = auth_data.get("expires_at")
@@ -113,7 +489,10 @@ class Authenticator:
             expires_at = self._get_expires_at(access_token)
             if expires_at:
                 auth_data["expires_at"] = expires_at
-                self._write_auth_file(auth_data)
+                with self._lock:
+                    latest_auth_data = self._read_auth_file() or auth_data
+                    latest_auth_data["expires_at"] = expires_at
+                    self._write_auth_file(latest_auth_data)
         if expires_at is None:
             return True
         return time.time() >= float(expires_at) - TOKEN_EXPIRY_SKEW_SECONDS
@@ -185,12 +564,12 @@ class Authenticator:
             raise GetDeviceCodeError(
                 message=f"Failed to request device code: {exc}",
                 status_code=exc.response.status_code,
-            )
+            ) from exc
         except Exception as exc:
             raise GetDeviceCodeError(
                 message=f"Failed to request device code: {exc}",
                 status_code=400,
-            )
+            ) from exc
 
         device_auth_id = data.get("device_auth_id")
         user_code = data.get("user_code") or data.get("usercode")
@@ -244,12 +623,12 @@ class Authenticator:
                 raise GetAccessTokenError(
                     message=f"Polling failed: {exc}",
                     status_code=exc.response.status_code,
-                )
+                ) from exc
             except Exception as exc:
                 raise GetAccessTokenError(
                     message=f"Polling failed: {exc}",
                     status_code=400,
-                )
+                ) from exc
             time.sleep(max(interval, DEVICE_CODE_POLL_SLEEP_SECONDS))
 
         raise GetAccessTokenError(
@@ -279,12 +658,12 @@ class Authenticator:
             raise GetAccessTokenError(
                 message=f"Token exchange failed: {exc}",
                 status_code=exc.response.status_code,
-            )
+            ) from exc
         except Exception as exc:
             raise GetAccessTokenError(
                 message=f"Token exchange failed: {exc}",
                 status_code=400,
-            )
+            ) from exc
 
         if not all(
             key in data for key in ("access_token", "refresh_token", "id_token")
@@ -317,12 +696,12 @@ class Authenticator:
             raise RefreshAccessTokenError(
                 message=f"Refresh token failed: {exc}",
                 status_code=exc.response.status_code,
-            )
+            ) from exc
         except Exception as exc:
             raise RefreshAccessTokenError(
                 message=f"Refresh token failed: {exc}",
                 status_code=400,
-            )
+            ) from exc
 
         access_token = data.get("access_token")
         id_token = data.get("id_token")
@@ -379,10 +758,9 @@ class Authenticator:
         deadline = time.time() + timeout_seconds
         while time.time() < deadline:
             auth_data = self._read_auth_file()
-            if auth_data:
-                access_token = auth_data.get("access_token")
-                if access_token and not self._is_token_expired(auth_data, access_token):
-                    return access_token
+            access_token = self._get_valid_access_token_from_auth_data(auth_data)
+            if access_token:
+                return access_token
             sleep_for = min(
                 DEVICE_CODE_POLL_SLEEP_SECONDS, max(0.0, deadline - time.time())
             )

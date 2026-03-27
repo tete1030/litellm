@@ -293,6 +293,7 @@ WATSONX_DEFAULT_API_VERSION = "2024-03-13"
 COHERE_DEFAULT_EMBEDDING_INPUT_TYPE: "COHERE_EMBEDDING_INPUT_TYPES" = "search_document"
 ### CREDENTIALS ###
 credential_list: List["CredentialItem"] = []
+chatgpt_auth_profiles: Dict[str, Dict[str, Any]] = {}
 ### GUARDRAILS ###
 llamaguard_model_name: Optional[str] = None
 openai_moderations_model_name: Optional[str] = None

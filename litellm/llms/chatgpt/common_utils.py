@@ -136,6 +136,10 @@ class RefreshAccessTokenError(ChatGPTAuthError):
     pass
 
 
+class ChatGPTAuthProfileError(ChatGPTAuthError):
+    pass
+
+
 def _safe_header_value(value: str) -> str:
     if not value:
         return ""
@@ -249,6 +253,33 @@ def get_chatgpt_default_headers(
     if account_id:
         headers["ChatGPT-Account-Id"] = account_id
     return headers
+
+
+def merge_chatgpt_headers(
+    headers: dict,
+    default_headers: dict,
+    protected_header_keys: set[str],
+) -> dict:
+    merged_headers = dict(headers)
+    lower_to_actual_keys: dict[str, list[str]] = {}
+    for key in list(merged_headers.keys()):
+        lower_to_actual_keys.setdefault(key.lower(), []).append(key)
+
+    protected_header_keys_lower = {key.lower() for key in protected_header_keys}
+
+    for key, value in default_headers.items():
+        lower_key = key.lower()
+        existing_keys = lower_to_actual_keys.get(lower_key, [])
+        if lower_key in protected_header_keys_lower:
+            for existing_key in existing_keys:
+                merged_headers.pop(existing_key, None)
+            merged_headers[key] = value
+            lower_to_actual_keys[lower_key] = [key]
+        elif not existing_keys:
+            merged_headers[key] = value
+            lower_to_actual_keys[lower_key] = [key]
+
+    return merged_headers
 
 
 def get_chatgpt_default_instructions() -> str:

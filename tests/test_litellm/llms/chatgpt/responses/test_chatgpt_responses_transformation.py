@@ -6,6 +6,7 @@ Source: litellm/llms/chatgpt/responses/transformation.py
 import json
 import os
 import sys
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -13,10 +14,10 @@ import pytest
 
 sys.path.insert(0, os.path.abspath("../../../../.."))
 
+from litellm.llms.chatgpt.responses.transformation import ChatGPTResponsesAPIConfig
 from litellm.types.router import GenericLiteLLMParams
 from litellm.types.utils import LlmProviders
 from litellm.utils import ProviderConfigManager
-from litellm.llms.chatgpt.responses.transformation import ChatGPTResponsesAPIConfig
 
 
 class TestChatGPTResponsesAPITransformation:
@@ -41,11 +42,13 @@ class TestChatGPTResponsesAPITransformation:
         assert isinstance(config, ChatGPTResponsesAPIConfig)
         assert config.custom_llm_provider == LlmProviders.CHATGPT
 
-    @patch("litellm.llms.chatgpt.responses.transformation.Authenticator")
-    def test_chatgpt_responses_endpoint_url(self, mock_authenticator_class):
+    @patch(
+        "litellm.llms.chatgpt.responses.transformation.get_chatgpt_authenticator"
+    )
+    def test_chatgpt_responses_endpoint_url(self, mock_get_chatgpt_authenticator):
         mock_auth_instance = MagicMock()
         mock_auth_instance.get_api_base.return_value = "https://chatgpt.example.com"
-        mock_authenticator_class.return_value = mock_auth_instance
+        mock_get_chatgpt_authenticator.return_value = mock_auth_instance
 
         config = ChatGPTResponsesAPIConfig()
 
@@ -61,16 +64,21 @@ class TestChatGPTResponsesAPITransformation:
             api_base="https://chatgpt.example.com/", litellm_params={}
         )
         assert url_with_slash == "https://chatgpt.example.com/responses"
+        mock_get_chatgpt_authenticator.assert_called_with({})
 
-    @patch("litellm.llms.chatgpt.responses.transformation.Authenticator")
-    def test_validate_environment_headers(self, mock_authenticator_class):
+    @patch(
+        "litellm.llms.chatgpt.responses.transformation.get_chatgpt_authenticator"
+    )
+    def test_validate_environment_headers(self, mock_get_chatgpt_authenticator):
         mock_auth_instance = MagicMock()
         mock_auth_instance.get_access_token.return_value = "access-123"
         mock_auth_instance.get_account_id.return_value = "acct-123"
-        mock_authenticator_class.return_value = mock_auth_instance
+        mock_get_chatgpt_authenticator.return_value = mock_auth_instance
 
         config = ChatGPTResponsesAPIConfig()
-        litellm_params = GenericLiteLLMParams(litellm_session_id="session-123")
+        litellm_params = cast(
+            GenericLiteLLMParams, {"litellm_session_id": "session-123"}
+        )
         headers = config.validate_environment(
             headers={"originator": "custom-origin"},
             model="gpt-5.2",
@@ -83,6 +91,70 @@ class TestChatGPTResponsesAPITransformation:
         assert headers["content-type"] == "application/json"
         assert headers["accept"] == "text/event-stream"
         assert headers["session_id"] == "session-123"
+        mock_get_chatgpt_authenticator.assert_called_with(litellm_params)
+
+    @patch(
+        "litellm.llms.chatgpt.responses.transformation.get_chatgpt_authenticator"
+    )
+    def test_validate_environment_uses_profile_specific_authenticator(
+        self, mock_get_chatgpt_authenticator
+    ):
+        mock_auth_instance = MagicMock()
+        mock_auth_instance.get_access_token.return_value = "profile-token"
+        mock_auth_instance.get_account_id.return_value = "acct-profile"
+        mock_get_chatgpt_authenticator.return_value = mock_auth_instance
+
+        config = ChatGPTResponsesAPIConfig()
+        litellm_params = cast(
+            GenericLiteLLMParams,
+            {
+                "chatgpt_auth_profile": "account-a",
+                "litellm_session_id": "session-a",
+            },
+        )
+
+        headers = config.validate_environment(
+            headers={},
+            model="chatgpt/gpt-5.3-codex",
+            litellm_params=litellm_params,
+        )
+
+        assert headers["Authorization"] == "Bearer profile-token"
+        assert headers["ChatGPT-Account-Id"] == "acct-profile"
+        mock_get_chatgpt_authenticator.assert_called_with(litellm_params)
+
+    @patch(
+        "litellm.llms.chatgpt.responses.transformation.get_chatgpt_authenticator"
+    )
+    def test_validate_environment_overrides_lowercase_protected_headers(
+        self, mock_get_chatgpt_authenticator
+    ):
+        mock_auth_instance = MagicMock()
+        mock_auth_instance.get_access_token.return_value = "profile-token"
+        mock_auth_instance.get_account_id.return_value = "acct-profile"
+        mock_get_chatgpt_authenticator.return_value = mock_auth_instance
+
+        config = ChatGPTResponsesAPIConfig()
+        headers = config.validate_environment(
+            headers={
+                "authorization": "Bearer wrong-token",
+                "chatgpt-account-id": "wrong-acct",
+                "accept": "application/json",
+                "originator": "custom-origin",
+            },
+            model="chatgpt/gpt-5.3-codex",
+            litellm_params=cast(
+                GenericLiteLLMParams, {"litellm_session_id": "session-a"}
+            ),
+        )
+
+        assert headers["Authorization"] == "Bearer profile-token"
+        assert headers["ChatGPT-Account-Id"] == "acct-profile"
+        assert headers["accept"] == "text/event-stream"
+        assert headers["session_id"] == "session-a"
+        assert headers["originator"] == "custom-origin"
+        assert "authorization" not in headers
+        assert "chatgpt-account-id" not in headers
 
     @pytest.mark.parametrize(
         "model_name",

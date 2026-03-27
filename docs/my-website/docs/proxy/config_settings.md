@@ -3,6 +3,11 @@
 ```yaml
 environment_variables: {}
 
+chatgpt_auth_profiles:
+  default:
+    token_dir: /path/to/chatgpt/default
+    auth_file: auth.json
+
 model_list:
   - model_name: string
     litellm_params: {}
@@ -172,6 +177,7 @@ router_settings:
 
 | Name | Type | Description |
 |------|------|-------------|
+| chatgpt_auth_profiles | object | Named ChatGPT OAuth profiles keyed by profile name. Each profile may set `token_dir` and/or `auth_file`. Deployments reference these with `litellm_params.chatgpt_auth_profile`. |
 | success_callback | array of strings | List of success callbacks. [Doc Proxy logging callbacks](logging), [Doc Metrics](prometheus) |
 | failure_callback | array of strings | List of failure callbacks [Doc Proxy logging callbacks](logging), [Doc Metrics](prometheus) |
 | callbacks | array of strings | List of callbacks - runs on success and failure [Doc Proxy logging callbacks](logging), [Doc Metrics](prometheus) |
