@@ -141,6 +141,7 @@ profile = "black"
 [tool.poetry.scripts]
 litellm = 'litellm:run_server'
 litellm-proxy = 'litellm.proxy.client.cli:cli'
+litellm-chatgpt = 'litellm.llms.chatgpt.login_cli:cli'
 
 [tool.poetry.group.dev.dependencies]
 diff-cover = "^9.0"

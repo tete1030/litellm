@@ -135,3 +135,59 @@ export CHATGPT_AUTH_PROFILES_JSON='{
   "account-b": {"token_dir": "~/.config/litellm/chatgpt/account-b"}
 }'
 ```
+
+### Login a Named Profile
+
+If you install LiteLLM as a package, you can manage named ChatGPT profiles with the bundled CLI.
+
+Login or relogin a profile:
+
+```bash showLineNumbers
+litellm-chatgpt login account-b --config ~/.config/litellm/config.yaml
+```
+
+Add or update a profile entry in your config:
+
+```bash showLineNumbers
+litellm-chatgpt profile add account-b --config ~/.config/litellm/config.yaml
+```
+
+Add a profile and immediately create a deployment in `model_list` for it:
+
+```bash showLineNumbers
+litellm-chatgpt profile add account-b \
+  --config ~/.config/litellm/config.yaml \
+  --with-deployment \
+  --model-name gpt-5.4 \
+  --provider-model chatgpt/gpt-5.4
+```
+
+List configured profiles and their linked deployments:
+
+```bash showLineNumbers
+litellm-chatgpt profile ls --config ~/.config/litellm/config.yaml
+```
+
+Remove a profile entry from your config:
+
+```bash showLineNumbers
+litellm-chatgpt profile rm account-b --config ~/.config/litellm/config.yaml
+```
+
+Force a fresh device-code login and back up the existing `auth.json` first:
+
+```bash showLineNumbers
+litellm-chatgpt login account-b --config ~/.config/litellm/config.yaml --force
+```
+
+Query usage for all configured profiles:
+
+```bash showLineNumbers
+litellm-chatgpt usage --config ~/.config/litellm/config.yaml
+```
+
+Query usage for one profile only:
+
+```bash showLineNumbers
+litellm-chatgpt usage account-b --config ~/.config/litellm/config.yaml
+```
