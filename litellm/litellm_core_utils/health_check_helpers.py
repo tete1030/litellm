@@ -15,6 +15,16 @@ TEST_PDF_URL = "data:application/pdf;base64,JVBERi0xLjQKJeLjz9MKMyAwIG9iago8PC9U
 
 class HealthCheckHelpers:
     @staticmethod
+    def _get_responses_health_check_input(prompt: Optional[str] = None) -> list:
+        health_prompt = prompt or "test"
+        return [
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": health_prompt}],
+            }
+        ]
+
+    @staticmethod
     async def ahealth_check_wildcard_models(
         model: str,
         custom_llm_provider: str,
@@ -207,7 +217,7 @@ class HealthCheckHelpers:
             ),
             "responses": lambda: litellm.aresponses(
                 **_filter_model_params(model_params=model_params),
-                input=prompt or "test",
+                input=HealthCheckHelpers._get_responses_health_check_input(prompt),
             ),
             "ocr": lambda: litellm.aocr(
                 **_filter_model_params(model_params=model_params),

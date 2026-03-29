@@ -1,7 +1,7 @@
 """Test health check helper functions"""
 import os
 import sys
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -66,6 +66,49 @@ def test_get_metadata_for_health_check_call():
     assert isinstance(result["tags"], list)
     assert len(result["tags"]) == 1
     assert result["tags"][0] == LITTELM_INTERNAL_HEALTH_SERVICE_ACCOUNT_NAME
+
+
+def test_get_responses_health_check_input_returns_message_list():
+    result = HealthCheckHelpers._get_responses_health_check_input("ping")
+
+    assert result == [
+        {
+            "role": "user",
+            "content": [{"type": "input_text", "text": "ping"}],
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_responses_mode_health_check_uses_list_input():
+    captured_input = None
+
+    async def mock_aresponses(**kwargs):
+        nonlocal captured_input
+        captured_input = kwargs["input"]
+
+        mock_response = MagicMock()
+        mock_response._hidden_params = {"headers": {}}
+        return mock_response
+
+    with patch("litellm.aresponses", side_effect=mock_aresponses):
+        response = await ahealth_check(
+            model_params={
+                "model": "chatgpt/gpt-5.4",
+                "api_key": "fake-key",
+                "api_base": "https://chatgpt.com/backend-api/codex",
+            },
+            mode="responses",
+            prompt="health test",
+        )
+
+    assert "error" not in response
+    assert captured_input == [
+        {
+            "role": "user",
+            "content": [{"type": "input_text", "text": "health test"}],
+        }
+    ]
 
 
 def test_get_litellm_internal_health_check_user_api_key_auth():
@@ -134,4 +177,4 @@ async def test_ahealth_check_failure_masks_raw_request_headers():
     if "Content-Type" in headers:
         assert headers["Content-Type"] == "application/json"
     
-    print(f"Masked Authorization header: {headers.get('Authorization', 'NOT FOUND')}") 
+    assert headers.get("Authorization") is not None
