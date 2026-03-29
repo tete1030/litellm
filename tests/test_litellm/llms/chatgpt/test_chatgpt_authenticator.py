@@ -4,6 +4,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 from unittest.mock import patch
 
 import pytest
@@ -15,7 +16,10 @@ from litellm.llms.chatgpt.authenticator import (
     reset_chatgpt_authenticator_cache,
     resolve_chatgpt_auth_profile,
 )
-from litellm.llms.chatgpt.common_utils import ChatGPTAuthProfileError
+from litellm.llms.chatgpt.common_utils import (
+    ChatGPTAuthProfileError,
+    GetAccessTokenError,
+)
 from litellm.types.router import GenericLiteLLMParams
 
 
@@ -146,6 +150,70 @@ class TestChatGPTAuthenticator:
         assert account_id == "acct-123"
         saved_auth_data = json.loads(auth_path.read_text())
         assert saved_auth_data["account_id"] == "acct-123"
+
+    def test_create_browser_login_session_uses_pkce_and_state(self, monkeypatch):
+        monkeypatch.setenv("CHATGPT_TOKEN_DIR", "/tmp/chatgpt-default")
+        authenticator = Authenticator()
+
+        session = authenticator.create_browser_login_session(
+            allowed_workspace_id="workspace-123"
+        )
+
+        parsed = urlparse(session.authorize_url)
+        params = parse_qs(parsed.query)
+        assert parsed.scheme == "https"
+        assert parsed.netloc == "auth.openai.com"
+        assert parsed.path == "/oauth/authorize"
+        assert params["response_type"] == ["code"]
+        assert params["redirect_uri"] == [session.redirect_uri]
+        assert params["state"] == [session.state]
+        assert params["code_challenge_method"] == ["S256"]
+        assert params["allowed_workspace_id"] == ["workspace-123"]
+        assert len(session.code_verifier) > 40
+
+    def test_complete_browser_login_exchanges_code_and_persists_auth(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv("CHATGPT_TOKEN_DIR", str(tmp_path))
+        authenticator = Authenticator()
+        session = authenticator.create_browser_login_session()
+
+        with patch.object(
+            authenticator,
+            "_exchange_authorization_code_for_tokens",
+            return_value={
+                "access_token": _make_jwt({"exp": int(time.time()) + 3600}),
+                "refresh_token": "refresh-123",
+                "id_token": _make_jwt(
+                    {"https://api.openai.com/auth": {"chatgpt_account_id": "acct-123"}}
+                ),
+            },
+        ) as mock_exchange:
+            tokens = authenticator.complete_browser_login(
+                session,
+                f"{session.redirect_uri}?code=auth-code-123&state={session.state}",
+            )
+
+        assert tokens["refresh_token"] == "refresh-123"
+        mock_exchange.assert_called_once_with(
+            authorization_code="auth-code-123",
+            redirect_uri=session.redirect_uri,
+            code_verifier=session.code_verifier,
+        )
+        saved_auth_data = json.loads(Path(authenticator.auth_file).read_text())
+        assert saved_auth_data["refresh_token"] == "refresh-123"
+        assert saved_auth_data["account_id"] == "acct-123"
+
+    def test_complete_browser_login_rejects_state_mismatch(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("CHATGPT_TOKEN_DIR", str(tmp_path))
+        authenticator = Authenticator()
+        session = authenticator.create_browser_login_session()
+
+        with pytest.raises(GetAccessTokenError, match="state mismatch"):
+            authenticator.complete_browser_login(
+                session,
+                f"{session.redirect_uri}?code=auth-code-123&state=wrong-state",
+            )
 
     def test_same_profile_refresh_is_locked(self, tmp_path):
         litellm.chatgpt_auth_profiles = {

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import time
+import webbrowser
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -13,7 +14,7 @@ import click
 import litellm
 from litellm.llms.custom_httpx.http_handler import _get_httpx_client
 
-from .authenticator import get_chatgpt_authenticator
+from .authenticator import BrowserLoginSession, get_chatgpt_authenticator
 
 DEFAULT_CONFIG = Path.home() / ".config/litellm/config.chatgpt-multi.yaml"
 DEFAULT_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
@@ -178,6 +179,29 @@ def _load_auth_data(profile: str) -> tuple[Any, Path, Dict[str, Any]]:
     auth_path = Path(authenticator.auth_file)
     auth_data = authenticator._read_auth_file() or {}
     return authenticator, auth_path, auth_data
+
+
+def _get_login_session_path(auth_path: Path) -> Path:
+    return auth_path.with_name("browser-login-session.json")
+
+
+def _write_login_session(session_path: Path, session: BrowserLoginSession) -> None:
+    session_path.parent.mkdir(parents=True, exist_ok=True)
+    session_path.write_text(json.dumps(asdict(session), indent=2) + "\n")
+
+
+def _read_login_session(session_path: Path) -> BrowserLoginSession:
+    if not session_path.exists():
+        raise click.ClickException(
+            f"No pending browser login session found at {session_path}. Run `litellm-chatgpt login <profile>` first."
+        )
+    try:
+        payload = json.loads(session_path.read_text())
+        return BrowserLoginSession(**payload)
+    except Exception as exc:
+        raise click.ClickException(
+            f"Failed reading browser login session {session_path}: {exc}"
+        ) from exc
 
 
 def _get_usage_access_token(authenticator: Any, auth_data: Dict[str, Any]) -> str:
@@ -596,22 +620,68 @@ def profile_ls(config_path: str, json_output: bool) -> None:
     show_default=True,
     help="LiteLLM config file containing chatgpt_auth_profiles.",
 )
-def profile_rm(profile: str, config_path: str) -> None:
+@click.option(
+    "--purge-files",
+    is_flag=True,
+    help="Also delete the profile auth.json and remove the profile directory if it becomes empty.",
+)
+def profile_rm(profile: str, config_path: str, purge_files: bool) -> None:
     """Remove a named ChatGPT auth profile from config."""
     resolved_config = Path(config_path).expanduser().resolve()
+    profiles = _prepare_profiles(resolved_config)
+    if profile not in profiles:
+        raise click.ClickException(
+            f"Profile '{profile}' not found in chatgpt_auth_profiles"
+        )
+
+    authenticator = get_chatgpt_authenticator({"chatgpt_auth_profile": profile})
+    auth_path = Path(authenticator.auth_file)
+    session_path = _get_login_session_path(auth_path)
+    token_dir_path = Path(authenticator.token_dir)
 
     def _updater(profiles: Dict[str, Any]) -> None:
-        if profile not in profiles:
-            raise click.ClickException(
-                f"Profile '{profile}' not found in chatgpt_auth_profiles"
-            )
         del profiles[profile]
 
     _update_profiles_in_config(resolved_config, _updater)
+
+    removed_session = False
+    if session_path.exists():
+        session_path.unlink()
+        removed_session = True
+
+    removed_auth = False
+    removed_token_dir = False
+    if purge_files:
+        if auth_path.exists():
+            auth_path.unlink()
+            removed_auth = True
+
+        if token_dir_path.exists() and token_dir_path.is_dir():
+            try:
+                token_dir_path.rmdir()
+                removed_token_dir = True
+            except OSError:
+                removed_token_dir = False
+
     click.echo(f"removed profile: {profile}")
     click.echo(f"config:          {resolved_config}")
+    if removed_session:
+        click.echo(f"removed session: {session_path}")
+    if purge_files:
+        if removed_auth:
+            click.echo(f"removed auth:    {auth_path}")
+        if removed_token_dir:
+            click.echo(f"removed dir:     {token_dir_path}")
+        elif token_dir_path.exists():
+            click.echo(
+                f"note: token dir not removed (not empty): {token_dir_path}"
+            )
+    else:
+        click.echo(
+            "note: auth.json is kept by default; use --purge-files to delete auth.json and attempt to remove the profile directory."
+        )
     click.echo(
-        "note: this does not delete auth files or remove model_list deployments; clean those up separately if needed."
+        "note: model_list deployments are not removed automatically; clean those up separately if needed."
     )
 
 
@@ -629,13 +699,47 @@ def profile_rm(profile: str, config_path: str) -> None:
     is_flag=True,
     help="Backup and remove the current auth.json before logging in again.",
 )
-def login(profile: str, config_path: str, force: bool) -> None:
+@click.option(
+    "--browser/--device",
+    "browser_login",
+    default=True,
+    show_default=True,
+    help="Use browser OAuth login (default) or opt into device-code login.",
+)
+@click.option(
+    "--callback-url",
+    help="Optional full callback URL captured after browser login approval.",
+)
+@click.option(
+    "--open-browser",
+    is_flag=True,
+    help="Attempt to open the authorize URL in your default browser automatically.",
+)
+@click.option(
+    "--redirect-uri",
+    help="Override the OAuth redirect URI used for browser login.",
+)
+@click.option(
+    "--allowed-workspace-id",
+    help="Optional workspace restriction passed to the browser authorize URL.",
+)
+def login(
+    profile: str,
+    config_path: str,
+    force: bool,
+    browser_login: bool,
+    callback_url: Optional[str],
+    open_browser: bool,
+    redirect_uri: Optional[str],
+    allowed_workspace_id: Optional[str],
+) -> None:
     """Login or relogin a ChatGPT OAuth profile for LiteLLM."""
     resolved_config = Path(config_path).expanduser().resolve()
     _prepare_profiles(resolved_config)
 
     authenticator = get_chatgpt_authenticator({"chatgpt_auth_profile": profile})
     auth_path = Path(authenticator.auth_file)
+    session_path = _get_login_session_path(auth_path)
 
     click.echo(f"profile: {profile}")
     click.echo(f"config:  {resolved_config}")
@@ -649,7 +753,40 @@ def login(profile: str, config_path: str, force: bool) -> None:
         auth_path.unlink()
         click.echo(f"backed up existing auth to: {backup_path}")
 
-    token = authenticator.get_access_token()
+    if force and session_path.exists():
+        session_path.unlink()
+        click.echo(f"removed pending browser login session: {session_path}")
+
+    if browser_login:
+        if callback_url:
+            login_session = _read_login_session(session_path)
+            token = authenticator.complete_browser_login(login_session, callback_url)[
+                "access_token"
+            ]
+            if session_path.exists():
+                session_path.unlink()
+            click.echo("browser login complete")
+        else:
+            login_session = authenticator.create_browser_login_session(
+                redirect_uri=redirect_uri,
+                allowed_workspace_id=allowed_workspace_id,
+            )
+            _write_login_session(session_path, login_session)
+            click.echo("browser login url:")
+            click.echo(login_session.authorize_url)
+            click.echo(f"session: {session_path}")
+            click.echo(
+                "After approving access in your browser, run this command again with --callback-url '<full callback url>'."
+            )
+            if open_browser:
+                opened = webbrowser.open(login_session.authorize_url)
+                if not opened:
+                    click.echo("warning: failed to open a browser automatically; open the URL manually.")
+            return
+    else:
+        click.echo("using device-code login")
+        token = authenticator._login_device_code()["access_token"]
+
     account_id = authenticator.get_account_id()
 
     auth_data: Dict[str, Any] = {}

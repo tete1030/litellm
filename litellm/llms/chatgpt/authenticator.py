@@ -1,9 +1,11 @@
 import base64
+import hashlib
 import json
 import os
 import tempfile
 import threading
 import time
+from urllib.parse import parse_qs, urlencode, urlparse
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
@@ -20,7 +22,10 @@ from .common_utils import (
     CHATGPT_DEVICE_CODE_URL,
     CHATGPT_DEVICE_TOKEN_URL,
     CHATGPT_DEVICE_VERIFY_URL,
+    CHATGPT_OAUTH_AUTHORIZE_URL,
+    CHATGPT_OAUTH_SCOPE,
     CHATGPT_OAUTH_TOKEN_URL,
+    get_chatgpt_originator,
     ChatGPTAuthProfileError,
     GetAccessTokenError,
     GetDeviceCodeError,
@@ -34,6 +39,7 @@ DEVICE_CODE_POLL_SLEEP_SECONDS = 5
 DEFAULT_CHATGPT_PROFILE_NAME = "default"
 DEFAULT_CHATGPT_TOKEN_DIR = os.path.expanduser("~/.config/litellm/chatgpt")
 DEFAULT_CHATGPT_AUTH_FILE = "auth.json"
+DEFAULT_BROWSER_LOGIN_PORT = 1455
 CHATGPT_AUTH_PROFILES_ENV_VARS = (
     "CHATGPT_AUTH_PROFILES_JSON",
     "CHATGPT_AUTH_PROFILES",
@@ -53,8 +59,20 @@ class ResolvedChatGPTAuthProfile:
     cache_key: str
 
 
+@dataclass(frozen=True)
+class BrowserLoginSession:
+    authorize_url: str
+    redirect_uri: str
+    state: str
+    code_verifier: str
+
+
 def _normalize_path(path: str) -> str:
     return os.path.abspath(os.path.expanduser(path))
+
+
+def _base64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("utf-8").rstrip("=")
 
 
 def _get_default_token_dir() -> str:
@@ -527,6 +545,95 @@ class Authenticator:
                 return account_id
         return None
 
+    def create_browser_login_session(
+        self,
+        redirect_uri: Optional[str] = None,
+        allowed_workspace_id: Optional[str] = None,
+    ) -> BrowserLoginSession:
+        resolved_redirect_uri = (
+            redirect_uri
+            or f"http://localhost:{DEFAULT_BROWSER_LOGIN_PORT}/auth/callback"
+        )
+        state = _base64url_encode(os.urandom(32))
+        code_verifier = _base64url_encode(os.urandom(64))
+        code_challenge = _base64url_encode(
+            hashlib.sha256(code_verifier.encode("utf-8")).digest()
+        )
+        query_params = {
+            "response_type": "code",
+            "client_id": CHATGPT_CLIENT_ID,
+            "redirect_uri": resolved_redirect_uri,
+            "scope": CHATGPT_OAUTH_SCOPE,
+            "code_challenge": code_challenge,
+            "code_challenge_method": "S256",
+            "id_token_add_organizations": "true",
+            "codex_cli_simplified_flow": "true",
+            "state": state,
+            "originator": get_chatgpt_originator(),
+        }
+        if allowed_workspace_id:
+            query_params["allowed_workspace_id"] = allowed_workspace_id
+        authorize_url = (
+            f"{CHATGPT_OAUTH_AUTHORIZE_URL}?{urlencode(query_params, doseq=False)}"
+        )
+        return BrowserLoginSession(
+            authorize_url=authorize_url,
+            redirect_uri=resolved_redirect_uri,
+            state=state,
+            code_verifier=code_verifier,
+        )
+
+    def complete_browser_login(
+        self,
+        session: BrowserLoginSession,
+        callback_url: str,
+    ) -> Dict[str, str]:
+        parsed = urlparse(callback_url.strip())
+        callback_query = callback_url.strip()
+        if parsed.scheme and parsed.netloc:
+            callback_query = parsed.query
+        elif callback_query.startswith("?"):
+            callback_query = callback_query[1:]
+
+        query_params = parse_qs(callback_query, keep_blank_values=True)
+        error = query_params.get("error", [None])[0]
+        if error:
+            error_description = query_params.get("error_description", [None])[0]
+            raise GetAccessTokenError(
+                message=(
+                    f"Browser login failed: {error}"
+                    + (
+                        f" ({error_description})"
+                        if error_description
+                        else ""
+                    )
+                ),
+                status_code=400,
+            )
+
+        callback_state = query_params.get("state", [None])[0]
+        if callback_state != session.state:
+            raise GetAccessTokenError(
+                message="Browser login failed: state mismatch in callback URL.",
+                status_code=400,
+            )
+
+        code = query_params.get("code", [None])[0]
+        if not code:
+            raise GetAccessTokenError(
+                message="Browser login failed: callback URL did not contain an authorization code.",
+                status_code=400,
+            )
+
+        tokens = self._exchange_authorization_code_for_tokens(
+            authorization_code=code,
+            redirect_uri=session.redirect_uri,
+            code_verifier=session.code_verifier,
+        )
+        auth_data = self._build_auth_record(tokens)
+        self._write_auth_file(auth_data)
+        return tokens
+
     def _login_device_code(self) -> Dict[str, str]:
         cooldown_remaining = self._get_device_code_cooldown_remaining(
             self._read_auth_file()
@@ -636,16 +743,20 @@ class Authenticator:
             status_code=408,
         )
 
-    def _exchange_code_for_tokens(self, code_data: Dict[str, str]) -> Dict[str, str]:
+    def _exchange_authorization_code_for_tokens(
+        self,
+        authorization_code: str,
+        redirect_uri: str,
+        code_verifier: str,
+    ) -> Dict[str, str]:
         try:
             client = _get_httpx_client()
-            redirect_uri = f"{CHATGPT_AUTH_BASE}/deviceauth/callback"
             body = (
                 "grant_type=authorization_code"
-                f"&code={code_data['authorization_code']}"
+                f"&code={authorization_code}"
                 f"&redirect_uri={redirect_uri}"
                 f"&client_id={CHATGPT_CLIENT_ID}"
-                f"&code_verifier={code_data['code_verifier']}"
+                f"&code_verifier={code_verifier}"
             )
             resp = client.post(
                 CHATGPT_OAUTH_TOKEN_URL,
@@ -677,6 +788,13 @@ class Authenticator:
             "refresh_token": data["refresh_token"],
             "id_token": data["id_token"],
         }
+
+    def _exchange_code_for_tokens(self, code_data: Dict[str, str]) -> Dict[str, str]:
+        return self._exchange_authorization_code_for_tokens(
+            authorization_code=code_data["authorization_code"],
+            redirect_uri=f"{CHATGPT_AUTH_BASE}/deviceauth/callback",
+            code_verifier=code_data["code_verifier"],
+        )
 
     def _refresh_tokens(self, refresh_token: str) -> Dict[str, str]:
         try:

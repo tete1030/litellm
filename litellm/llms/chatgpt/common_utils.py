@@ -14,10 +14,14 @@ from litellm.llms.base_llm.chat.transformation import BaseLLMException
 CHATGPT_AUTH_BASE = "https://auth.openai.com"
 CHATGPT_DEVICE_CODE_URL = f"{CHATGPT_AUTH_BASE}/api/accounts/deviceauth/usercode"
 CHATGPT_DEVICE_TOKEN_URL = f"{CHATGPT_AUTH_BASE}/api/accounts/deviceauth/token"
+CHATGPT_OAUTH_AUTHORIZE_URL = f"{CHATGPT_AUTH_BASE}/oauth/authorize"
 CHATGPT_OAUTH_TOKEN_URL = f"{CHATGPT_AUTH_BASE}/oauth/token"
 CHATGPT_DEVICE_VERIFY_URL = f"{CHATGPT_AUTH_BASE}/codex/device"
 CHATGPT_API_BASE = "https://chatgpt.com/backend-api/codex"
 CHATGPT_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
+CHATGPT_OAUTH_SCOPE = (
+    "openid profile email offline_access api.connectors.read api.connectors.invoke"
+)
 
 DEFAULT_ORIGINATOR = "codex_cli_rs"
 DEFAULT_USER_AGENT = "codex_cli_rs/0.0.0 (Unknown 0; unknown) unknown"

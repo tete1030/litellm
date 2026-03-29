@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 from click.testing import CliRunner
 
+from litellm.llms.chatgpt.authenticator import BrowserLoginSession
 from litellm.llms.chatgpt.login_cli import UsageResult, UsageWindow, cli
 
 
@@ -17,8 +18,12 @@ def test_chatgpt_login_cli_reads_yaml_config_and_logs_in(tmp_path: Path) -> None
 
     mock_authenticator = MagicMock()
     mock_authenticator.auth_file = str(tmp_path / "buy2" / "auth.json")
-    mock_authenticator.get_access_token.return_value = "token-123"
-    mock_authenticator.get_account_id.return_value = "acct-123"
+    mock_authenticator.create_browser_login_session.return_value = BrowserLoginSession(
+        authorize_url="https://auth.openai.com/oauth/authorize?foo=bar",
+        redirect_uri="http://localhost:1455/auth/callback",
+        state="xyz",
+        code_verifier="verifier-123",
+    )
 
     auth_path = Path(mock_authenticator.auth_file)
     auth_path.parent.mkdir(parents=True, exist_ok=True)
@@ -29,12 +34,57 @@ def test_chatgpt_login_cli_reads_yaml_config_and_logs_in(tmp_path: Path) -> None
         "litellm.llms.chatgpt.login_cli.get_chatgpt_authenticator",
         return_value=mock_authenticator,
     ) as mock_get_authenticator:
-        result = runner.invoke(cli, ["login", "buy2", "--config", str(config_path)])
+        start_result = runner.invoke(
+            cli,
+            [
+                "login",
+                "buy2",
+                "--config",
+                str(config_path),
+            ],
+        )
 
-    assert result.exit_code == 0
-    assert "login complete" in result.output
-    assert "account_id: acct-123" in result.output
-    mock_get_authenticator.assert_called_once_with({"chatgpt_auth_profile": "buy2"})
+        session_path = auth_path.with_name("browser-login-session.json")
+        assert session_path.exists()
+
+        mock_authenticator.complete_browser_login.return_value = {
+            "access_token": "token-123"
+        }
+        mock_authenticator.get_account_id.return_value = "acct-123"
+
+        complete_result = runner.invoke(
+            cli,
+            [
+                "login",
+                "buy2",
+                "--config",
+                str(config_path),
+                "--callback-url",
+                "http://localhost:1455/auth/callback?code=abc&state=xyz",
+            ],
+        )
+
+    assert start_result.exit_code == 0
+    assert "browser login url:" in start_result.output
+    assert "session:" in start_result.output
+    assert complete_result.exit_code == 0
+    assert "browser login complete" in complete_result.output
+    assert "login complete" in complete_result.output
+    assert "account_id: acct-123" in complete_result.output
+    assert not session_path.exists()
+    assert mock_get_authenticator.call_count == 2
+    assert mock_get_authenticator.call_args_list[0].args == (
+        {"chatgpt_auth_profile": "buy2"},
+    )
+    assert mock_get_authenticator.call_args_list[1].args == (
+        {"chatgpt_auth_profile": "buy2"},
+    )
+    mock_authenticator.create_browser_login_session.assert_called_once_with(
+        redirect_uri=None, allowed_workspace_id=None
+    )
+    login_session = mock_authenticator.complete_browser_login.call_args.args[0]
+    assert login_session.state == "xyz"
+    mock_authenticator.complete_browser_login.assert_called_once()
 
 
 def test_chatgpt_login_cli_force_backs_up_existing_auth(tmp_path: Path) -> None:
@@ -49,8 +99,12 @@ def test_chatgpt_login_cli_force_backs_up_existing_auth(tmp_path: Path) -> None:
 
     mock_authenticator = MagicMock()
     mock_authenticator.auth_file = str(auth_path)
-    mock_authenticator.get_access_token.return_value = "token-123"
-    mock_authenticator.get_account_id.return_value = "acct-777"
+    mock_authenticator.create_browser_login_session.return_value = BrowserLoginSession(
+        authorize_url="https://auth.openai.com/oauth/authorize?foo=bar",
+        redirect_uri="http://localhost:1455/auth/callback",
+        state="xyz",
+        code_verifier="verifier-123",
+    )
 
     runner = CliRunner()
     with patch(
@@ -58,13 +112,80 @@ def test_chatgpt_login_cli_force_backs_up_existing_auth(tmp_path: Path) -> None:
         return_value=mock_authenticator,
     ):
         result = runner.invoke(
-            cli, ["login", "buy7", "--config", str(config_path), "--force"]
+            cli,
+            [
+                "login",
+                "buy7",
+                "--config",
+                str(config_path),
+                "--force",
+            ],
         )
 
     assert result.exit_code == 0
     assert "backed up existing auth to:" in result.output
     backups = list(auth_path.parent.glob("auth.backup-*.json"))
     assert len(backups) == 1
+
+
+def test_chatgpt_login_cli_device_mode_is_opt_in(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "chatgpt_auth_profiles:\n  buy3:\n    token_dir: /tmp/buy3\n"
+    )
+
+    mock_authenticator = MagicMock()
+    mock_authenticator.auth_file = str(tmp_path / "buy3" / "auth.json")
+    mock_authenticator._login_device_code.return_value = {"access_token": "token-123"}
+    mock_authenticator.get_account_id.return_value = "acct-333"
+
+    auth_path = Path(mock_authenticator.auth_file)
+    auth_path.parent.mkdir(parents=True, exist_ok=True)
+    auth_path.write_text(json.dumps({"expires_at": 1234567890}))
+
+    runner = CliRunner()
+    with patch(
+        "litellm.llms.chatgpt.login_cli.get_chatgpt_authenticator",
+        return_value=mock_authenticator,
+    ):
+        result = runner.invoke(
+            cli, ["login", "buy3", "--config", str(config_path), "--device"]
+        )
+
+    assert result.exit_code == 0
+    assert "using device-code login" in result.output
+    mock_authenticator._login_device_code.assert_called_once_with()
+    mock_authenticator.create_browser_login_session.assert_not_called()
+
+
+def test_chatgpt_login_cli_complete_requires_pending_session(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "chatgpt_auth_profiles:\n  buy2:\n    token_dir: /tmp/buy2\n"
+    )
+
+    mock_authenticator = MagicMock()
+    mock_authenticator.auth_file = str(tmp_path / "buy2" / "auth.json")
+
+    runner = CliRunner()
+    with patch(
+        "litellm.llms.chatgpt.login_cli.get_chatgpt_authenticator",
+        return_value=mock_authenticator,
+    ):
+        result = runner.invoke(
+            cli,
+            [
+                "login",
+                "buy2",
+                "--config",
+                str(config_path),
+                "--callback-url",
+                "http://localhost:1455/auth/callback?code=abc&state=xyz",
+            ],
+        )
+
+    assert result.exit_code != 0
+    assert "No pending browser login session found" in result.output
 
 
 def test_chatgpt_login_cli_requires_config_file(tmp_path: Path) -> None:
@@ -227,6 +348,52 @@ def test_chatgpt_profile_rm_removes_profile_from_config(tmp_path: Path) -> None:
     data = config_path.read_text()
     assert "buy1:" in data
     assert "buy2:" not in data
+
+
+def test_chatgpt_profile_rm_deletes_pending_browser_session_by_default(
+    tmp_path: Path,
+) -> None:
+    token_dir = tmp_path / "buy2"
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"chatgpt_auth_profiles:\n  buy2:\n    token_dir: {token_dir}\n"
+    )
+    token_dir.mkdir(parents=True, exist_ok=True)
+    session_path = token_dir / "browser-login-session.json"
+    auth_path = token_dir / "auth.json"
+    session_path.write_text(json.dumps({"state": "xyz"}))
+    auth_path.write_text(json.dumps({"access_token": "token"}))
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["profile", "rm", "buy2", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    assert not session_path.exists()
+    assert auth_path.exists()
+    assert "removed session:" in result.output
+    assert "auth.json is kept by default" in result.output
+
+
+def test_chatgpt_profile_rm_can_purge_auth_files(tmp_path: Path) -> None:
+    token_dir = tmp_path / "buy2"
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"chatgpt_auth_profiles:\n  buy2:\n    token_dir: {token_dir}\n"
+    )
+    token_dir.mkdir(parents=True, exist_ok=True)
+    (token_dir / "browser-login-session.json").write_text(json.dumps({"state": "xyz"}))
+    (token_dir / "auth.json").write_text(json.dumps({"access_token": "token"}))
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["profile", "rm", "buy2", "--config", str(config_path), "--purge-files"],
+    )
+
+    assert result.exit_code == 0
+    assert not token_dir.exists()
+    assert "removed auth:" in result.output
+    assert "removed dir:" in result.output
 
 
 def test_chatgpt_profile_rm_requires_existing_profile(tmp_path: Path) -> None:

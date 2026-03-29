@@ -1,6 +1,6 @@
 # ChatGPT Subscription
 
-Use ChatGPT Pro/Max subscription models through LiteLLM with OAuth device flow authentication.
+Use ChatGPT Pro/Max subscription models through LiteLLM with browser-based OAuth authentication.
 
 | Property | Details |
 |-------|-------|
@@ -17,11 +17,14 @@ Notes:
 
 ## Authentication
 
-ChatGPT subscription access uses an OAuth device code flow:
+ChatGPT subscription access supports browser OAuth login by default:
 
-1. LiteLLM prints a device code and verification URL
-2. Open the URL, sign in, and enter the code
-3. Tokens are stored locally for reuse
+1. LiteLLM prints an OpenAI authorize URL
+2. Open it in your browser and approve access
+3. Paste the redirected callback URL back into the CLI
+4. Tokens are stored locally for reuse
+
+Device-code login is still available as an opt-in fallback.
 
 ## Usage - LiteLLM Python SDK
 
@@ -146,6 +149,12 @@ Login or relogin a profile:
 litellm-chatgpt login account-b --config ~/.config/litellm/config.yaml
 ```
 
+Open the authorize URL automatically in your default browser:
+
+```bash showLineNumbers
+litellm-chatgpt login account-b --config ~/.config/litellm/config.yaml --open-browser
+```
+
 Add or update a profile entry in your config:
 
 ```bash showLineNumbers
@@ -174,10 +183,16 @@ Remove a profile entry from your config:
 litellm-chatgpt profile rm account-b --config ~/.config/litellm/config.yaml
 ```
 
-Force a fresh device-code login and back up the existing `auth.json` first:
+By default this also removes any pending `browser-login-session.json`, but keeps `auth.json` on disk. To delete both the auth file and the profile directory too:
 
 ```bash showLineNumbers
-litellm-chatgpt login account-b --config ~/.config/litellm/config.yaml --force
+litellm-chatgpt profile rm account-b --config ~/.config/litellm/config.yaml --purge-files
+```
+
+Opt into device-code login and back up the existing `auth.json` first:
+
+```bash showLineNumbers
+litellm-chatgpt login account-b --config ~/.config/litellm/config.yaml --device --force
 ```
 
 Query usage for all configured profiles:
