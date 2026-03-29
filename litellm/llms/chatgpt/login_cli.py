@@ -16,8 +16,19 @@ from litellm.llms.custom_httpx.http_handler import _get_httpx_client
 
 from .authenticator import BrowserLoginSession, get_chatgpt_authenticator
 
-DEFAULT_CONFIG = Path.home() / ".config/litellm/config.chatgpt-multi.yaml"
+DEFAULT_CONFIG_ENV_VAR = "CONFIG_FILE_PATH"
+DEFAULT_CONFIG_DIR = Path.home() / ".config/litellm"
+DEFAULT_CONFIG = DEFAULT_CONFIG_DIR / "config.yaml"
+DEFAULT_CONFIG_CANDIDATES = (
+    DEFAULT_CONFIG,
+    DEFAULT_CONFIG_DIR / "config.yml",
+)
+DEFAULT_CONFIG_HELP = (
+    "$CONFIG_FILE_PATH, ~/.config/litellm/config.yaml, ~/.config/litellm/config.yml"
+)
 DEFAULT_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
+DEFAULT_METRICS_PORT = 9464
+DEFAULT_METRICS_INTERVAL_SECONDS = 300
 
 
 @dataclass
@@ -25,6 +36,7 @@ class UsageWindow:
     label: str
     used_percent: float
     reset_at: Optional[int]
+    limit_seconds: Optional[int] = None
 
 
 @dataclass
@@ -36,6 +48,192 @@ class UsageResult:
     windows: List[UsageWindow]
     status: str
     error: Optional[str] = None
+
+
+class ChatGPTUsageMetrics:
+    def __init__(self, registry: Any) -> None:
+        from prometheus_client import Gauge
+
+        self.refresh_success = Gauge(
+            "litellm_chatgpt_usage_refresh_success",
+            "Whether the last usage refresh completed successfully.",
+            registry=registry,
+        )
+        self.refresh_timestamp = Gauge(
+            "litellm_chatgpt_usage_refresh_timestamp_seconds",
+            "Unix timestamp of the last usage refresh attempt.",
+            registry=registry,
+        )
+        self.profile_up = Gauge(
+            "litellm_chatgpt_profile_up",
+            "Whether usage data was fetched successfully for the profile.",
+            labelnames=["profile"],
+            registry=registry,
+        )
+        self.credits_balance = Gauge(
+            "litellm_chatgpt_profile_credits_balance",
+            "Current ChatGPT credits balance for the profile.",
+            labelnames=["profile"],
+            registry=registry,
+        )
+        self.window_used_percent = Gauge(
+            "litellm_chatgpt_usage_window_used_percent",
+            "Used percentage for a ChatGPT usage window.",
+            labelnames=["profile", "window"],
+            registry=registry,
+        )
+        self.window_used_ratio = Gauge(
+            "litellm_chatgpt_usage_window_used_ratio",
+            "Used ratio for a ChatGPT usage window.",
+            labelnames=["profile", "window"],
+            registry=registry,
+        )
+        self.window_limit_seconds = Gauge(
+            "litellm_chatgpt_usage_window_limit_seconds",
+            "Configured duration of the ChatGPT usage window in seconds.",
+            labelnames=["profile", "window"],
+            registry=registry,
+        )
+        self.window_reset_timestamp = Gauge(
+            "litellm_chatgpt_usage_window_reset_timestamp_seconds",
+            "Unix timestamp when the ChatGPT usage window resets.",
+            labelnames=["profile", "window"],
+            registry=registry,
+        )
+        self.window_remaining_seconds = Gauge(
+            "litellm_chatgpt_usage_window_remaining_seconds",
+            "Seconds remaining before the ChatGPT usage window resets.",
+            labelnames=["profile", "window"],
+            registry=registry,
+        )
+        self._known_profiles: set[str] = set()
+        self._known_windows: set[tuple[str, str]] = set()
+
+    def update(self, results: List[UsageResult], refreshed_at: Optional[float] = None) -> None:
+        refreshed_at = refreshed_at or time.time()
+        self.refresh_timestamp.set(refreshed_at)
+        self.refresh_success.set(1)
+
+        active_profiles: set[str] = set()
+        active_windows: set[tuple[str, str]] = set()
+
+        for result in results:
+            profile = result.profile
+            active_profiles.add(profile)
+            is_ok = result.status == "ok"
+            self.profile_up.labels(profile=profile).set(1 if is_ok else 0)
+            self.credits_balance.labels(profile=profile).set(
+                result.credits_balance
+                if result.credits_balance is not None
+                else float("nan")
+            )
+
+            for window in result.windows:
+                window_key = (profile, window.label)
+                active_windows.add(window_key)
+                remaining_seconds = (
+                    max(float(window.reset_at) - refreshed_at, 0.0)
+                    if window.reset_at is not None
+                    else float("nan")
+                )
+                self.window_used_percent.labels(profile=profile, window=window.label).set(
+                    window.used_percent
+                )
+                self.window_used_ratio.labels(profile=profile, window=window.label).set(
+                    window.used_percent / 100.0
+                )
+                self.window_limit_seconds.labels(profile=profile, window=window.label).set(
+                    window.limit_seconds
+                    if window.limit_seconds is not None
+                    else float("nan")
+                )
+                self.window_reset_timestamp.labels(profile=profile, window=window.label).set(
+                    float(window.reset_at) if window.reset_at is not None else float("nan")
+                )
+                self.window_remaining_seconds.labels(
+                    profile=profile, window=window.label
+                ).set(remaining_seconds)
+
+        for profile in self._known_profiles - active_profiles:
+            self.profile_up.remove(profile)
+            self.credits_balance.remove(profile)
+
+        for profile, window in self._known_windows - active_windows:
+            self.window_used_percent.remove(profile, window)
+            self.window_used_ratio.remove(profile, window)
+            self.window_limit_seconds.remove(profile, window)
+            self.window_reset_timestamp.remove(profile, window)
+            self.window_remaining_seconds.remove(profile, window)
+
+        self._known_profiles = active_profiles
+        self._known_windows = active_windows
+
+    def mark_refresh_failure(self, refreshed_at: Optional[float] = None) -> None:
+        self.refresh_timestamp.set(refreshed_at or time.time())
+        self.refresh_success.set(0)
+
+
+def _iter_default_config_candidates() -> List[Path]:
+    candidates: List[Path] = []
+    env_config = litellm.get_secret(DEFAULT_CONFIG_ENV_VAR)
+    if isinstance(env_config, str) and env_config.strip():
+        candidates.append(Path(env_config.strip()).expanduser())
+    candidates.extend(DEFAULT_CONFIG_CANDIDATES)
+    return candidates
+
+
+def _resolve_config_path(
+    config_path: Optional[str], *, require_exists: bool = True
+) -> Path:
+    if config_path:
+        resolved = Path(config_path).expanduser().resolve()
+    else:
+        resolved = next(
+            (candidate.expanduser().resolve() for candidate in _iter_default_config_candidates() if candidate.exists()),
+            DEFAULT_CONFIG.expanduser().resolve(),
+        )
+
+    if require_exists and not resolved.exists():
+        raise click.ClickException(f"Config not found: {resolved}")
+    return resolved
+
+
+def _parse_optional_int(value: Any) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.isdigit():
+            return int(stripped)
+    return None
+
+
+def _format_window_label(limit_seconds: Optional[int], default_hours: int) -> str:
+    if limit_seconds is None or limit_seconds <= 0:
+        return f"{default_hours}h"
+    if limit_seconds % 604800 == 0:
+        weeks = limit_seconds // 604800
+        return f"{weeks}w"
+    if limit_seconds % 86400 == 0:
+        days = limit_seconds // 86400
+        return f"{days}d"
+    if limit_seconds % 3600 == 0:
+        hours = limit_seconds // 3600
+        return f"{hours}h"
+    if limit_seconds % 60 == 0:
+        minutes = limit_seconds // 60
+        return f"{minutes}m"
+    return f"{limit_seconds}s"
+
+
+def _get_usage_url() -> str:
+    return str(
+        litellm.get_secret("LITELLM_CHATGPT_USAGE_URL")
+        or litellm.get_secret("CHATGPT_USAGE_URL")
+        or DEFAULT_USAGE_URL
+    )
 
 
 def _load_config_file(config_path: Path) -> Dict[str, Any]:
@@ -220,12 +418,8 @@ def _get_usage_access_token(authenticator: Any, auth_data: Dict[str, Any]) -> st
 
 
 def _normalize_usage_window(label: str, window_payload: Dict[str, Any]) -> UsageWindow:
-    reset_at_raw = window_payload.get("reset_at")
-    reset_at: Optional[int] = None
-    if isinstance(reset_at_raw, (int, float)):
-        reset_at = int(reset_at_raw)
-    elif isinstance(reset_at_raw, str) and reset_at_raw.isdigit():
-        reset_at = int(reset_at_raw)
+    reset_at = _parse_optional_int(window_payload.get("reset_at"))
+    limit_seconds = _parse_optional_int(window_payload.get("limit_window_seconds"))
 
     used_percent_raw = window_payload.get("used_percent", 0)
     try:
@@ -237,6 +431,7 @@ def _normalize_usage_window(label: str, window_payload: Dict[str, Any]) -> Usage
         label=label,
         used_percent=max(0.0, min(100.0, used_percent)),
         reset_at=reset_at,
+        limit_seconds=limit_seconds,
     )
 
 
@@ -255,15 +450,26 @@ def _normalize_usage_payload(profile: str, account_id: str, payload: Dict[str, A
     if isinstance(rate_limit, dict):
         primary = rate_limit.get("primary_window")
         if isinstance(primary, dict):
-            hours = int(primary.get("limit_window_seconds", 0) or 0) // 3600
             windows.append(
-                _normalize_usage_window(f"{hours if hours > 0 else 3}h", primary)
+                _normalize_usage_window(
+                    _format_window_label(
+                        _parse_optional_int(primary.get("limit_window_seconds")),
+                        default_hours=3,
+                    ),
+                    primary,
+                )
             )
         secondary = rate_limit.get("secondary_window")
         if isinstance(secondary, dict):
-            hours = int(secondary.get("limit_window_seconds", 0) or 0) // 3600
-            label = "Day" if hours >= 24 else f"{hours if hours > 0 else 24}h"
-            windows.append(_normalize_usage_window(label, secondary))
+            windows.append(
+                _normalize_usage_window(
+                    _format_window_label(
+                        _parse_optional_int(secondary.get("limit_window_seconds")),
+                        default_hours=24,
+                    ),
+                    secondary,
+                )
+            )
 
     return UsageResult(
         profile=profile,
@@ -405,6 +611,15 @@ def _render_usage_report(results: List[UsageResult]) -> str:
     )
 
 
+def _refresh_usage_metrics(
+    config_path: Path, usage_url: str, metrics: ChatGPTUsageMetrics
+) -> List[UsageResult]:
+    profiles = _prepare_profiles(config_path)
+    results = [_fetch_usage_for_profile(name, usage_url) for name in sorted(profiles.keys())]
+    metrics.update(results)
+    return results
+
+
 @click.group(name="litellm-chatgpt")
 def cli() -> None:
     """Manage ChatGPT OAuth profiles for LiteLLM."""
@@ -420,8 +635,8 @@ def profile_group() -> None:
 @click.option(
     "--config",
     "config_path",
-    default=str(DEFAULT_CONFIG),
-    show_default=True,
+    default=None,
+    show_default=DEFAULT_CONFIG_HELP,
     help="LiteLLM config file containing chatgpt_auth_profiles.",
 )
 @click.option(
@@ -471,7 +686,7 @@ def profile_add(
     deployment_id: Optional[str],
 ) -> None:
     """Add or update a named ChatGPT auth profile in config."""
-    resolved_config = Path(config_path).expanduser().resolve()
+    resolved_config = _resolve_config_path(config_path)
     resolved_deployment_id = deployment_id or f"chatgpt-{profile}"
 
     def _updater(profiles: Dict[str, Any], data: Dict[str, Any]) -> None:
@@ -547,8 +762,8 @@ def profile_add(
 @click.option(
     "--config",
     "config_path",
-    default=str(DEFAULT_CONFIG),
-    show_default=True,
+    default=None,
+    show_default=DEFAULT_CONFIG_HELP,
     help="LiteLLM config file containing chatgpt_auth_profiles.",
 )
 @click.option(
@@ -559,7 +774,7 @@ def profile_add(
 )
 def profile_ls(config_path: str, json_output: bool) -> None:
     """List configured ChatGPT auth profiles and linked deployments."""
-    resolved_config = Path(config_path).expanduser().resolve()
+    resolved_config = _resolve_config_path(config_path)
     data = _load_config_file(resolved_config)
     profiles = data.get("chatgpt_auth_profiles") or {}
     if not isinstance(profiles, dict):
@@ -616,8 +831,8 @@ def profile_ls(config_path: str, json_output: bool) -> None:
 @click.option(
     "--config",
     "config_path",
-    default=str(DEFAULT_CONFIG),
-    show_default=True,
+    default=None,
+    show_default=DEFAULT_CONFIG_HELP,
     help="LiteLLM config file containing chatgpt_auth_profiles.",
 )
 @click.option(
@@ -627,7 +842,7 @@ def profile_ls(config_path: str, json_output: bool) -> None:
 )
 def profile_rm(profile: str, config_path: str, purge_files: bool) -> None:
     """Remove a named ChatGPT auth profile from config."""
-    resolved_config = Path(config_path).expanduser().resolve()
+    resolved_config = _resolve_config_path(config_path)
     profiles = _prepare_profiles(resolved_config)
     if profile not in profiles:
         raise click.ClickException(
@@ -690,8 +905,8 @@ def profile_rm(profile: str, config_path: str, purge_files: bool) -> None:
 @click.option(
     "--config",
     "config_path",
-    default=str(DEFAULT_CONFIG),
-    show_default=True,
+    default=None,
+    show_default=DEFAULT_CONFIG_HELP,
     help="LiteLLM config file containing chatgpt_auth_profiles.",
 )
 @click.option(
@@ -734,7 +949,7 @@ def login(
     allowed_workspace_id: Optional[str],
 ) -> None:
     """Login or relogin a ChatGPT OAuth profile for LiteLLM."""
-    resolved_config = Path(config_path).expanduser().resolve()
+    resolved_config = _resolve_config_path(config_path)
     _prepare_profiles(resolved_config)
 
     authenticator = get_chatgpt_authenticator({"chatgpt_auth_profile": profile})
@@ -804,8 +1019,8 @@ def login(
 @click.option(
     "--config",
     "config_path",
-    default=str(DEFAULT_CONFIG),
-    show_default=True,
+    default=None,
+    show_default=DEFAULT_CONFIG_HELP,
     help="LiteLLM config file containing chatgpt_auth_profiles.",
 )
 @click.option(
@@ -816,14 +1031,10 @@ def login(
 )
 def usage(profile: Optional[str], config_path: str, json_output: bool) -> None:
     """Query usage for one or all configured ChatGPT profiles."""
-    resolved_config = Path(config_path).expanduser().resolve()
+    resolved_config = _resolve_config_path(config_path)
     profiles = _prepare_profiles(resolved_config)
     profile_names = [profile] if profile else sorted(profiles.keys())
-    usage_url = str(
-        litellm.get_secret("LITELLM_CHATGPT_USAGE_URL")
-        or litellm.get_secret("CHATGPT_USAGE_URL")
-        or DEFAULT_USAGE_URL
-    )
+    usage_url = _get_usage_url()
 
     results = [_fetch_usage_for_profile(name, usage_url) for name in profile_names]
     if json_output:
@@ -831,6 +1042,71 @@ def usage(profile: Optional[str], config_path: str, json_output: bool) -> None:
         return
 
     click.echo(_render_usage_report(results))
+
+
+@cli.command(name="metrics")
+@click.option(
+    "--config",
+    "config_path",
+    default=None,
+    show_default=DEFAULT_CONFIG_HELP,
+    help="LiteLLM config file containing chatgpt_auth_profiles.",
+)
+@click.option(
+    "--listen-host",
+    default="0.0.0.0",
+    show_default=True,
+    help="Listen address for the Prometheus metrics HTTP server.",
+)
+@click.option(
+    "--port",
+    default=DEFAULT_METRICS_PORT,
+    show_default=True,
+    type=int,
+    help="Listen port for the Prometheus metrics HTTP server.",
+)
+@click.option(
+    "--interval-seconds",
+    default=DEFAULT_METRICS_INTERVAL_SECONDS,
+    show_default=True,
+    type=int,
+    help="Refresh interval for ChatGPT usage polling.",
+)
+def metrics(config_path: Optional[str], listen_host: str, port: int, interval_seconds: int) -> None:
+    """Serve Prometheus metrics for ChatGPT account usage windows."""
+    if interval_seconds <= 0:
+        raise click.ClickException("--interval-seconds must be greater than 0")
+
+    resolved_config = _resolve_config_path(config_path)
+    usage_url = _get_usage_url()
+
+    try:
+        from prometheus_client import CollectorRegistry, start_http_server
+    except ModuleNotFoundError as exc:
+        raise click.ClickException(
+            "Prometheus metrics require prometheus_client. Install with `pip install prometheus-client`."
+        ) from exc
+
+    registry = CollectorRegistry()
+    usage_metrics = ChatGPTUsageMetrics(registry=registry)
+
+    results = _refresh_usage_metrics(resolved_config, usage_url, usage_metrics)
+    start_http_server(port, addr=listen_host, registry=registry)
+    click.echo(
+        f"serving ChatGPT usage metrics on http://{listen_host}:{port}/metrics "
+        f"for {len(results)} profile(s); refresh interval {interval_seconds}s"
+    )
+
+    while True:
+        try:
+            time.sleep(interval_seconds)
+            _refresh_usage_metrics(resolved_config, usage_url, usage_metrics)
+        except KeyboardInterrupt:
+            click.echo("stopping ChatGPT usage metrics exporter")
+            return
+        except Exception as exc:
+            usage_metrics.mark_refresh_failure()
+            click.echo(f"warning: failed refreshing ChatGPT usage metrics: {exc}", err=True)
 
 
 if __name__ == "__main__":

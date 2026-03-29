@@ -5,9 +5,17 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from click.testing import CliRunner
+from prometheus_client import CollectorRegistry, generate_latest
 
 from litellm.llms.chatgpt.authenticator import BrowserLoginSession
-from litellm.llms.chatgpt.login_cli import UsageResult, UsageWindow, cli
+from litellm.llms.chatgpt.login_cli import (
+    ChatGPTUsageMetrics,
+    UsageResult,
+    UsageWindow,
+    _normalize_usage_payload,
+    _resolve_config_path,
+    cli,
+)
 
 
 def test_chatgpt_login_cli_reads_yaml_config_and_logs_in(tmp_path: Path) -> None:
@@ -261,6 +269,117 @@ def test_chatgpt_usage_cli_can_emit_json(tmp_path: Path) -> None:
     payload = json.loads(result.output)
     assert payload[0]["profile"] == "buy2"
     assert payload[0]["plan"] == "plus"
+
+
+def test_chatgpt_usage_cli_uses_config_file_path_env_var(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "chatgpt_auth_profiles:\n  buy2:\n    token_dir: /tmp/buy2\n"
+    )
+
+    runner = CliRunner()
+    with patch(
+        "litellm.llms.chatgpt.login_cli._fetch_usage_for_profile",
+        return_value=UsageResult(
+            profile="buy2",
+            account_id="acct-buy2-1234",
+            plan="plus",
+            credits_balance=0.0,
+            windows=[UsageWindow(label="3h", used_percent=5.0, reset_at=1700000000)],
+            status="ok",
+        ),
+    ):
+        result = runner.invoke(
+            cli,
+            ["usage", "buy2", "--json"],
+            env={"CONFIG_FILE_PATH": str(config_path)},
+        )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload[0]["profile"] == "buy2"
+
+
+def test_chatgpt_resolve_config_prefers_yaml_before_yml(tmp_path: Path) -> None:
+    standard_config = tmp_path / "config.yaml"
+    secondary_config = tmp_path / "config.yml"
+    standard_config.write_text("chatgpt_auth_profiles: {}\n")
+    secondary_config.write_text("chatgpt_auth_profiles: {}\n")
+
+    with patch("litellm.llms.chatgpt.login_cli.DEFAULT_CONFIG", standard_config), patch(
+        "litellm.llms.chatgpt.login_cli.DEFAULT_CONFIG_CANDIDATES",
+        (standard_config, secondary_config),
+    ):
+        resolved = _resolve_config_path(None)
+
+    assert resolved == standard_config.resolve()
+
+
+def test_chatgpt_usage_payload_labels_weekly_windows() -> None:
+    result = _normalize_usage_payload(
+        profile="buy2",
+        account_id="acct-buy2-1234",
+        payload={
+            "plan_type": "plus",
+            "rate_limit": {
+                "primary_window": {
+                    "limit_window_seconds": 18000,
+                    "used_percent": 25,
+                    "reset_at": 1700000000,
+                },
+                "secondary_window": {
+                    "limit_window_seconds": 604800,
+                    "used_percent": 80,
+                    "reset_at": 1700500000,
+                },
+            },
+        },
+    )
+
+    assert [window.label for window in result.windows] == ["5h", "1w"]
+    assert [window.limit_seconds for window in result.windows] == [18000, 604800]
+
+
+def test_chatgpt_usage_metrics_exporter_updates_prometheus_gauges() -> None:
+    registry = CollectorRegistry()
+    metrics = ChatGPTUsageMetrics(registry=registry)
+    metrics.update(
+        [
+            UsageResult(
+                profile="buy2",
+                account_id="acct-buy2-1234",
+                plan="plus",
+                credits_balance=12.5,
+                windows=[
+                    UsageWindow(
+                        label="5h",
+                        used_percent=40.0,
+                        reset_at=1700003600,
+                        limit_seconds=18000,
+                    ),
+                    UsageWindow(
+                        label="1w",
+                        used_percent=80.0,
+                        reset_at=1700600000,
+                        limit_seconds=604800,
+                    ),
+                ],
+                status="ok",
+            )
+        ],
+        refreshed_at=1700000000,
+    )
+
+    payload = generate_latest(registry).decode("utf-8")
+    assert 'litellm_chatgpt_profile_up{profile="buy2"} 1.0' in payload
+    assert (
+        'litellm_chatgpt_usage_window_limit_seconds{profile="buy2",window="5h"} 18000.0'
+        in payload
+    )
+    assert (
+        'litellm_chatgpt_usage_window_remaining_seconds{profile="buy2",window="1w"} 600000.0'
+        in payload
+    )
 
 
 def test_chatgpt_profile_add_updates_yaml_config(tmp_path: Path) -> None:

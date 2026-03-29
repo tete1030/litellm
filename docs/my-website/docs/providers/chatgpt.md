@@ -118,6 +118,7 @@ litellm --config config.yaml
 - `CHATGPT_ORIGINATOR`: Override the `originator` header value
 - `CHATGPT_USER_AGENT`: Override the `User-Agent` header value
 - `CHATGPT_USER_AGENT_SUFFIX`: Optional suffix appended to the `User-Agent` header
+- `CONFIG_FILE_PATH`: Preferred LiteLLM config file path for both `litellm` and `litellm-chatgpt` in containerized setups
 
 ### Named Auth Profiles
 
@@ -142,6 +143,12 @@ export CHATGPT_AUTH_PROFILES_JSON='{
 ### Login a Named Profile
 
 If you install LiteLLM as a package, you can manage named ChatGPT profiles with the bundled CLI.
+
+If `--config` is omitted, `litellm-chatgpt` resolves the config in this order:
+
+1. `CONFIG_FILE_PATH`
+2. `~/.config/litellm/config.yaml`
+3. `~/.config/litellm/config.yml`
 
 Login or relogin a profile:
 
@@ -206,3 +213,22 @@ Query usage for one profile only:
 ```bash showLineNumbers
 litellm-chatgpt usage account-b --config ~/.config/litellm/config.yaml
 ```
+
+## Prometheus Exporter
+
+`litellm-chatgpt` can also expose ChatGPT account usage windows as Prometheus metrics. This is useful for scraping reset times and 5-hour / weekly quota windows into Prometheus, Grafana, or an InfluxDB-backed Grafana stack.
+
+```bash showLineNumbers
+CONFIG_FILE_PATH=~/.config/litellm/config.yaml \
+litellm-chatgpt metrics --listen-host 0.0.0.0 --port 9464 --interval-seconds 300
+```
+
+The exporter serves `/metrics` and refreshes account usage on the configured polling interval. Exposed metrics include:
+
+- `litellm_chatgpt_profile_up`
+- `litellm_chatgpt_profile_credits_balance`
+- `litellm_chatgpt_usage_window_used_percent`
+- `litellm_chatgpt_usage_window_used_ratio`
+- `litellm_chatgpt_usage_window_limit_seconds`
+- `litellm_chatgpt_usage_window_reset_timestamp_seconds`
+- `litellm_chatgpt_usage_window_remaining_seconds`
