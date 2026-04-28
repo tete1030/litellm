@@ -1,5 +1,5 @@
 import json
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 from litellm.constants import STREAM_SSE_DONE_STRING
 from litellm.exceptions import AuthenticationError
@@ -146,6 +146,9 @@ class ChatGPTResponsesAPIConfig(OpenAIResponsesAPIConfig):
 
         completed_response = None
         error_message = None
+        # ChatGPT Codex may send the final output only in output_item.done
+        # events, while response.completed.response.output is empty.
+        streamed_output_items: Dict[int, dict] = {}
         for chunk in body_text.splitlines():
             stripped_chunk = CustomStreamWrapper._strip_sse_data_from_chunk(chunk)
             if not stripped_chunk:
@@ -162,20 +165,15 @@ class ChatGPTResponsesAPIConfig(OpenAIResponsesAPIConfig):
             if not isinstance(parsed_chunk, dict):
                 continue
             event_type = parsed_chunk.get("type")
+            if event_type == ResponsesAPIStreamEvents.OUTPUT_ITEM_DONE:
+                self._accumulate_output_item_done(parsed_chunk, streamed_output_items)
+                continue
             if event_type == ResponsesAPIStreamEvents.RESPONSE_COMPLETED:
                 response_payload = parsed_chunk.get("response")
                 if isinstance(response_payload, dict):
-                    response_payload = dict(response_payload)
-                    if "created_at" in response_payload:
-                        response_payload["created_at"] = _safe_convert_created_field(
-                            response_payload["created_at"]
-                        )
-                    try:
-                        completed_response = ResponsesAPIResponse(**response_payload)
-                    except Exception:
-                        completed_response = ResponsesAPIResponse.model_construct(
-                            **response_payload
-                        )
+                    completed_response = self._build_completed_response(
+                        response_payload, streamed_output_items
+                    )
                 break
             if event_type in (
                 ResponsesAPIStreamEvents.RESPONSE_FAILED,
@@ -203,6 +201,38 @@ class ChatGPTResponsesAPIConfig(OpenAIResponsesAPIConfig):
         completed_response._hidden_params["additional_headers"] = processed_headers
         completed_response._hidden_params["headers"] = raw_headers
         return completed_response
+
+    @staticmethod
+    def _accumulate_output_item_done(
+        parsed_chunk: dict, streamed_output_items: Dict[int, dict]
+    ) -> None:
+        item = parsed_chunk.get("item")
+        output_index = parsed_chunk.get("output_index")
+        if not isinstance(item, dict):
+            return
+        try:
+            index = int(output_index)
+        except (TypeError, ValueError):
+            index = len(streamed_output_items)
+        streamed_output_items[index] = item
+
+    @staticmethod
+    def _build_completed_response(
+        response_payload: dict, streamed_output_items: Dict[int, dict]
+    ) -> ResponsesAPIResponse:
+        response_payload = dict(response_payload)
+        if "created_at" in response_payload:
+            response_payload["created_at"] = _safe_convert_created_field(
+                response_payload["created_at"]
+            )
+        if not response_payload.get("output") and streamed_output_items:
+            response_payload["output"] = [
+                item for _, item in sorted(streamed_output_items.items())
+            ]
+        try:
+            return ResponsesAPIResponse(**response_payload)
+        except Exception:
+            return ResponsesAPIResponse.model_construct(**response_payload)
 
     def get_complete_url(
         self,

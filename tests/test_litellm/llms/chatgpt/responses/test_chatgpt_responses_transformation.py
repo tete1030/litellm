@@ -269,3 +269,80 @@ class TestChatGPTResponsesAPITransformation:
         )
 
         assert parsed.output_text == "Hello!"
+
+    def test_chatgpt_non_stream_sse_uses_output_item_done_when_completed_output_empty(self):
+        config = ChatGPTResponsesAPIConfig()
+        done_item = {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "Recovered text"}],
+        }
+        response_payload = {
+            "id": "resp_test",
+            "object": "response",
+            "created_at": 1700000000,
+            "status": "completed",
+            "model": "gpt-5.3-codex",
+            "output": [],
+        }
+        sse_body = "\n".join(
+            [
+                f"data: {json.dumps({'type': 'response.output_item.done', 'output_index': 0, 'item': done_item})}",
+                f"data: {json.dumps({'type': 'response.completed', 'response': response_payload})}",
+                "data: [DONE]",
+                "",
+            ]
+        )
+        raw_response = httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, text=sse_body
+        )
+
+        parsed = config.transform_response_api_response(
+            model="chatgpt/gpt-5.3-codex",
+            raw_response=raw_response,
+            logging_obj=MagicMock(),
+        )
+
+        assert parsed.output_text == "Recovered text"
+        assert parsed.output == [done_item]
+
+    def test_chatgpt_non_stream_sse_prefers_completed_output_over_done_items(self):
+        config = ChatGPTResponsesAPIConfig()
+        done_item = {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "Stale text"}],
+        }
+        completed_item = {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "Authoritative text"}],
+        }
+        response_payload = {
+            "id": "resp_test",
+            "object": "response",
+            "created_at": 1700000000,
+            "status": "completed",
+            "model": "gpt-5.3-codex",
+            "output": [completed_item],
+        }
+        sse_body = "\n".join(
+            [
+                f"data: {json.dumps({'type': 'response.output_item.done', 'output_index': 0, 'item': done_item})}",
+                f"data: {json.dumps({'type': 'response.completed', 'response': response_payload})}",
+                "data: [DONE]",
+                "",
+            ]
+        )
+        raw_response = httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, text=sse_body
+        )
+
+        parsed = config.transform_response_api_response(
+            model="chatgpt/gpt-5.3-codex",
+            raw_response=raw_response,
+            logging_obj=MagicMock(),
+        )
+
+        assert parsed.output_text == "Authoritative text"
+        assert parsed.output == [completed_item]
