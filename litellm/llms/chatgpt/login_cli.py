@@ -6,6 +6,7 @@ import time
 import webbrowser
 from dataclasses import asdict
 from datetime import datetime
+from io import StringIO
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -88,6 +89,27 @@ def _load_config_file(config_path: Path) -> Dict[str, Any]:
         ) from exc
 
 
+def _load_yaml_config_round_trip(config_path: Path) -> Dict[str, Any]:
+    try:
+        from ruamel.yaml import YAML
+    except ModuleNotFoundError as exc:
+        raise click.ClickException(
+            "Editing YAML config files requires ruamel.yaml to preserve comments. "
+            "Install with `pip install 'litellm[proxy]'` or use a JSON config file."
+        ) from exc
+
+    yaml = YAML()
+    yaml.preserve_quotes = True
+
+    try:
+        with config_path.open("r", encoding="utf-8") as handle:
+            return yaml.load(handle) or {}
+    except Exception as exc:
+        raise click.ClickException(
+            f"Failed reading config file {config_path}: {exc}"
+        ) from exc
+
+
 def _load_chatgpt_auth_profiles(config_path: Path) -> Dict[str, Any]:
     data = _load_config_file(config_path)
     profiles = data.get("chatgpt_auth_profiles") or {}
@@ -99,9 +121,12 @@ def _load_chatgpt_auth_profiles(config_path: Path) -> Dict[str, Any]:
 
 
 def _load_config_with_format(config_path: Path) -> Tuple[Dict[str, Any], str]:
-    data = _load_config_file(config_path)
     suffix = config_path.suffix.lower()
     format_name = "json" if suffix == ".json" else "yaml"
+    if format_name == "json":
+        data = _load_config_file(config_path)
+    else:
+        data = _load_yaml_config_round_trip(config_path)
     return data, format_name
 
 
@@ -113,14 +138,18 @@ def _save_config_file(config_path: Path, data: Dict[str, Any], format_name: str)
             return
 
         try:
-            import yaml
+            from ruamel.yaml import YAML
         except ModuleNotFoundError as exc:
             raise click.ClickException(
-                "YAML config support requires PyYAML. Install with `pip install 'litellm[proxy]'` "
-                "or use a JSON config file."
+                "Editing YAML config files requires ruamel.yaml to preserve comments. "
+                "Install with `pip install 'litellm[proxy]'` or use a JSON config file."
             ) from exc
 
-        config_path.write_text(yaml.safe_dump(data, sort_keys=False))
+        yaml = YAML()
+        yaml.preserve_quotes = True
+        buffer = StringIO()
+        yaml.dump(data, buffer)
+        config_path.write_text(buffer.getvalue(), encoding="utf-8")
     except click.ClickException:
         raise
     except Exception as exc:

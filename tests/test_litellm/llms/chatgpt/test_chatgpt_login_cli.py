@@ -406,6 +406,30 @@ def test_chatgpt_profile_add_updates_yaml_config(tmp_path: Path) -> None:
     assert str((Path.home() / ".config/litellm/chatgpt/buy8").resolve()) in data
 
 
+def test_chatgpt_profile_add_preserves_yaml_comments(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "# top-level comment\n"
+        "chatgpt_auth_profiles:\n"
+        "  # existing profile comment\n"
+        "  buy1: # inline profile comment\n"
+        "    token_dir: /tmp/buy1\n"
+        "# model list comment\n"
+        "model_list: []\n"
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["profile", "add", "buy8", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    data = config_path.read_text()
+    assert "# top-level comment" in data
+    assert "# existing profile comment" in data
+    assert "# inline profile comment" in data
+    assert "# model list comment" in data
+    assert "buy8:" in data
+
+
 def test_chatgpt_profile_add_updates_json_config_with_custom_paths(tmp_path: Path) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps({"chatgpt_auth_profiles": {}}))
