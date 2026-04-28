@@ -11,6 +11,7 @@ import json
 
 import litellm
 from litellm.caching.dual_cache import DualCache
+from litellm.router_utils.cooldown_callbacks import router_cooldown_event_callback
 from litellm.router_utils.pre_call_checks.deployment_affinity_check import (
     DeploymentAffinityCheck,
 )
@@ -657,3 +658,89 @@ def test_cache_key_does_not_double_hash_user_api_key_hash():
         user_key=user_api_key_hash,
     )
     assert key.endswith(user_api_key_hash)
+
+
+@pytest.mark.asyncio
+async def test_router_cooldown_clears_session_affinity_mapping():
+    model_group = "gpt-5.3-codex"
+    session_id = "session-to-clear"
+    deployment_id = "deployment-1"
+
+    router = litellm.Router(
+        model_list=[
+            {
+                "model_name": model_group,
+                "litellm_params": {"model": "openai/gpt-5.3-codex-a"},
+                "model_info": {"id": deployment_id},
+            },
+            {
+                "model_name": model_group,
+                "litellm_params": {"model": "openai/gpt-5.3-codex-b"},
+                "model_info": {"id": "deployment-2"},
+            },
+        ],
+        optional_pre_call_checks=["session_affinity"],
+        deployment_affinity_ttl_seconds=60,
+    )
+
+    callback = next(
+        cb
+        for cb in (router.optional_callbacks or [])
+        if isinstance(cb, DeploymentAffinityCheck)
+    )
+    healthy_deployments = list(router.model_list)
+
+    await callback.async_pre_call_deployment_hook(
+        kwargs={
+            "model_info": {"id": deployment_id},
+            "metadata": {
+                "session_id": session_id,
+                "deployment_model_name": model_group,
+            },
+        },
+        call_type=None,
+    )
+
+    filtered_before = await callback.async_filter_deployments(
+        model=model_group,
+        healthy_deployments=healthy_deployments,
+        messages=None,
+        request_kwargs={"metadata": {"session_id": session_id}},
+        parent_otel_span=None,
+    )
+    assert len(filtered_before) == 1
+    assert filtered_before[0]["model_info"]["id"] == deployment_id
+
+    session_cache_key = DeploymentAffinityCheck.get_session_affinity_cache_key(
+        model_group=model_group,
+        session_id=session_id,
+    )
+    reverse_index_key = DeploymentAffinityCheck.get_session_affinity_deployment_index_key(
+        model_group=model_group,
+        model_id=deployment_id,
+    )
+    assert await router.cache.async_get_cache(key=session_cache_key) == {
+        "model_id": deployment_id
+    }
+    reverse_index_value = await router.cache.async_get_cache(key=reverse_index_key)
+    assert reverse_index_value is not None
+    assert set(reverse_index_value) == {session_id}
+
+    await router_cooldown_event_callback(
+        litellm_router_instance=router,
+        deployment_id=deployment_id,
+        exception_status=402,
+        cooldown_time=1800,
+    )
+
+    assert await router.cache.async_get_cache(key=session_cache_key) is None
+    assert await router.cache.async_get_cache(key=reverse_index_key) is None
+
+    filtered_after = await callback.async_filter_deployments(
+        model=model_group,
+        healthy_deployments=healthy_deployments,
+        messages=None,
+        request_kwargs={"metadata": {"session_id": session_id}},
+        parent_otel_span=None,
+    )
+    assert filtered_after == healthy_deployments

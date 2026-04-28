@@ -48,6 +48,13 @@ async def router_cooldown_event_callback(
     model_info = _deployment["model_info"]
     model_id = model_info.id
 
+    if _model_name:
+        await _clear_session_affinity_for_cooled_deployment(
+            litellm_router_instance=litellm_router_instance,
+            model_group=_model_name,
+            deployment_id=model_id,
+        )
+
     litellm_model_name = temp_litellm_params.get("model") or ""
     llm_provider = ""
     try:
@@ -80,6 +87,37 @@ async def router_cooldown_event_callback(
         )
 
     return
+
+
+async def _clear_session_affinity_for_cooled_deployment(
+    litellm_router_instance: LitellmRouter,
+    model_group: str,
+    deployment_id: str,
+):
+    from litellm.router_utils.pre_call_checks.deployment_affinity_check import (
+        DeploymentAffinityCheck,
+    )
+
+    optional_callbacks = getattr(litellm_router_instance, "optional_callbacks", None)
+    if optional_callbacks is None:
+        return
+
+    for callback in optional_callbacks:
+        if not isinstance(callback, DeploymentAffinityCheck):
+            continue
+
+        try:
+            await callback.async_clear_session_affinity_for_deployment(
+                model_group=model_group,
+                model_id=deployment_id,
+            )
+        except Exception as e:
+            verbose_logger.debug(
+                "Failed to clear session affinity for cooled deployment=%s model_group=%s error=%s",
+                deployment_id,
+                model_group,
+                e,
+            )
 
 
 def _get_prometheus_logger_from_callbacks() -> Optional[PrometheusLogger]:

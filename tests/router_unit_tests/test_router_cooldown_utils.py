@@ -19,6 +19,8 @@ from litellm.router_utils.cooldown_handlers import (
     _should_cooldown_deployment,
     cast_exception_status_to_int,
     _is_cooldown_required,
+    PAYMENT_REQUIRED_COOLDOWN_SECONDS,
+    _set_cooldown_deployments,
 )
 from litellm.router_utils.router_callbacks.track_deployment_metrics import (
     increment_deployment_failures_for_current_minute,
@@ -414,6 +416,81 @@ def test_is_cooldown_required_empty_string_exception_status(testing_litellm_rout
     assert (
         result is False
     ), "Should not require cooldown when exception_status is empty string"
+
+
+def test_is_cooldown_required_payment_required_status(testing_litellm_router):
+    """
+    Test that 402 errors trigger cooldown without becoming retryable.
+    """
+    result = _is_cooldown_required(
+        litellm_router_instance=testing_litellm_router,
+        model_id="test_deployment",
+        exception_status=402,
+    )
+
+    assert result is True, "Should require cooldown when exception_status is 402"
+    assert litellm._should_retry(402) is False, "402 should not become retryable"
+
+
+def test_should_cooldown_payment_required_ignores_allowed_fails():
+    router = Router(
+        model_list=[
+            {
+                "model_name": "gpt-3.5-turbo",
+                "litellm_params": {"model": "openai/gpt-3.5-turbo"},
+                "model_id": "test_deployment",
+            },
+            {
+                "model_name": "gpt-3.5-turbo",
+                "litellm_params": {"model": "openai/gpt-4o-mini"},
+                "model_id": "test_deployment_2",
+            },
+        ]
+    )
+    router.allowed_fails = 100
+
+    assert (
+        _should_cooldown_deployment(router, "test_deployment", 402, Exception("Test"))
+        is True
+    )
+
+
+def test_set_cooldown_deployments_extends_payment_required_cooldown():
+    router = Router(
+        model_list=[
+            {
+                "model_name": "gpt-3.5-turbo",
+                "litellm_params": {"model": "openai/gpt-3.5-turbo"},
+                "model_id": "test_deployment",
+            },
+            {
+                "model_name": "gpt-3.5-turbo",
+                "litellm_params": {"model": "openai/gpt-4o-mini"},
+                "model_id": "test_deployment_2",
+            },
+        ]
+    )
+    router.allowed_fails = 1
+    deployment_id = router.model_list[0]["model_info"]["id"]
+
+    with patch(
+        "litellm.router_utils.cooldown_handlers.asyncio.create_task",
+        return_value=None,
+    ):
+        cooled_down = _set_cooldown_deployments(
+            litellm_router_instance=router,
+            original_exception=Exception("402 failure"),
+            exception_status=402,
+            deployment=deployment_id,
+            time_to_cooldown=300,
+        )
+
+    assert cooled_down is True
+    cooldowns = router.cooldown_cache.get_active_cooldowns(
+        model_ids=[deployment_id],
+        parent_otel_span=None,
+    )
+    assert cooldowns[0][1]["cooldown_time"] == PAYMENT_REQUIRED_COOLDOWN_SECONDS
 
 
 def test_should_cooldown_deployment_minimum_request_threshold(testing_litellm_router):

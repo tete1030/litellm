@@ -185,6 +185,20 @@ class DeploymentAffinityCheck(CustomLogger):
     def get_session_affinity_cache_key(cls, model_group: str, session_id: str) -> str:
         return f"{cls.CACHE_KEY_PREFIX}:session:{model_group}:{session_id}"
 
+    @classmethod
+    def get_session_affinity_deployment_index_key(
+        cls, model_group: str, model_id: str
+    ) -> str:
+        return f"{cls.CACHE_KEY_PREFIX}:session_index:{model_group}:{model_id}"
+
+    @staticmethod
+    def _get_model_id_from_cache_result(cache_result: Any) -> Optional[str]:
+        if isinstance(cache_result, dict):
+            return cast(Optional[str], cache_result.get("model_id"))
+        if isinstance(cache_result, str):
+            return cache_result
+        return None
+
     @staticmethod
     def _get_user_key_from_metadata_dict(metadata: dict) -> Optional[str]:
         # NOTE: affinity is keyed on the *API key hash* provided by the proxy (not the
@@ -245,6 +259,41 @@ class DeploymentAffinityCheck(CustomLogger):
             if session_id is not None:
                 return session_id
         return None
+
+    async def async_clear_session_affinity_for_deployment(
+        self, model_group: str, model_id: str
+    ) -> int:
+        index_key = self.get_session_affinity_deployment_index_key(
+            model_group=model_group,
+            model_id=model_id,
+        )
+        session_ids = await self.cache.async_get_cache(key=index_key)
+
+        cleared_sessions = 0
+        if isinstance(session_ids, (list, set, tuple)):
+            for session_id in session_ids:
+                session_cache_key = self.get_session_affinity_cache_key(
+                    model_group=model_group,
+                    session_id=str(session_id),
+                )
+                session_cache_result = await self.cache.async_get_cache(
+                    key=session_cache_key
+                )
+                if (
+                    self._get_model_id_from_cache_result(session_cache_result)
+                    == str(model_id)
+                ):
+                    await self.cache.async_delete_cache(session_cache_key)
+                    cleared_sessions += 1
+
+        await self.cache.async_delete_cache(index_key)
+        verbose_router_logger.debug(
+            "DeploymentAffinityCheck: cleared %s session affinity mappings for deployment=%s model_group=%s",
+            cleared_sessions,
+            model_id,
+            model_group,
+        )
+        return cleared_sessions
 
     @staticmethod
     def _find_deployment_by_model_id(
@@ -317,13 +366,9 @@ class DeploymentAffinityCheck(CustomLogger):
                     key=session_cache_key
                 )
 
-                session_model_id: Optional[str] = None
-                if isinstance(session_cache_result, dict):
-                    session_model_id = cast(
-                        Optional[str], session_cache_result.get("model_id")
-                    )
-                elif isinstance(session_cache_result, str):
-                    session_model_id = session_cache_result
+                session_model_id = self._get_model_id_from_cache_result(
+                    session_cache_result
+                )
 
                 if session_model_id:
                     session_deployment = self._find_deployment_by_model_id(
@@ -356,12 +401,7 @@ class DeploymentAffinityCheck(CustomLogger):
         )
         cache_result = await self.cache.async_get_cache(key=cache_key)
 
-        model_id: Optional[str] = None
-        if isinstance(cache_result, dict):
-            model_id = cast(Optional[str], cache_result.get("model_id"))
-        elif isinstance(cache_result, str):
-            # Backwards / safety: allow raw string values.
-            model_id = cache_result
+        model_id = self._get_model_id_from_cache_result(cache_result)
 
         if not model_id:
             return typed_healthy_deployments
@@ -484,9 +524,18 @@ class DeploymentAffinityCheck(CustomLogger):
                 session_cache_key = self.get_session_affinity_cache_key(
                     model_group=deployment_model_name, session_id=session_id
                 )
+                session_index_key = self.get_session_affinity_deployment_index_key(
+                    model_group=deployment_model_name,
+                    model_id=str(model_id),
+                )
                 await self.cache.async_set_cache(
                     session_cache_key,
                     DeploymentAffinityCacheValue(model_id=str(model_id)),
+                    ttl=self.ttl_seconds,
+                )
+                await self.cache.async_set_cache_sadd(
+                    session_index_key,
+                    [str(session_id)],
                     ttl=self.ttl_seconds,
                 )
                 verbose_router_logger.debug(

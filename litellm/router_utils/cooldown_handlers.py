@@ -37,6 +37,9 @@ else:
     Span = Any
 
 
+PAYMENT_REQUIRED_COOLDOWN_SECONDS = 1800
+
+
 def _is_cooldown_required(
     litellm_router_instance: LitellmRouter,
     model_id: str,
@@ -74,6 +77,11 @@ def _is_cooldown_required(
 
             elif exception_status == 401:
                 # Cool down 401 Auth Errors
+                return True
+
+            elif exception_status == 402:
+                # Cool down 402 billing/workspace errors so future requests can
+                # route away from a bad deployment without retrying this call.
                 return True
 
             elif exception_status == 408:
@@ -187,6 +195,13 @@ def _should_cooldown_deployment(
 
     - v1 logic (Legacy): if allowed fails or allowed fail policy set, coolsdown if num fails in this minute > allowed fails
     """
+    exception_status_int = cast_exception_status_to_int(exception_status)
+
+    # 402 workspace/billing failures are treated as hard outages. Cool down the
+    # deployment immediately instead of waiting for the allowed_fails window.
+    if exception_status_int == 402:
+        return True
+
     ## BASE CASE - single deployment
     model_group = litellm_router_instance.get_model_group(id=deployment)
     is_single_deployment_model_group = False
@@ -220,7 +235,6 @@ def _should_cooldown_deployment(
             num_fails_this_minute,
         )
 
-        exception_status_int = cast_exception_status_to_int(exception_status)
         if exception_status_int == 429 and not is_single_deployment_model_group:
             return True
         elif (
@@ -293,6 +307,14 @@ def _set_cooldown_deployments(
 
     exception_status_int = cast_exception_status_to_int(exception_status)
     verbose_router_logger.debug(f"Attempting to add {deployment} to cooldown list")
+
+    if exception_status_int == 402:
+        if time_to_cooldown is None:
+            time_to_cooldown = PAYMENT_REQUIRED_COOLDOWN_SECONDS
+        else:
+            time_to_cooldown = max(
+                time_to_cooldown, PAYMENT_REQUIRED_COOLDOWN_SECONDS
+            )
 
     if _should_cooldown_deployment(
         litellm_router_instance=litellm_router_instance,
