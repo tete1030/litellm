@@ -812,12 +812,16 @@ class Authenticator:
             data = resp.json()
         except httpx.HTTPStatusError as exc:
             raise RefreshAccessTokenError(
-                message=f"Refresh token failed: {exc}",
+                message=(
+                    f"Refresh token failed for profile '{self.profile_name}': {exc}"
+                ),
                 status_code=exc.response.status_code,
             ) from exc
         except Exception as exc:
             raise RefreshAccessTokenError(
-                message=f"Refresh token failed: {exc}",
+                message=(
+                    f"Refresh token failed for profile '{self.profile_name}': {exc}"
+                ),
                 status_code=400,
             ) from exc
 

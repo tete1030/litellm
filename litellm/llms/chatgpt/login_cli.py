@@ -4,7 +4,7 @@ import json
 import shutil
 import time
 import webbrowser
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -12,9 +12,16 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import click
 
 import litellm
-from litellm.llms.custom_httpx.http_handler import _get_httpx_client
 
 from .authenticator import BrowserLoginSession, get_chatgpt_authenticator
+from . import usage_service
+
+ChatGPTUsageMetrics = usage_service.ChatGPTUsageMetrics
+UsageResult = usage_service.UsageResult
+UsageWindow = usage_service.UsageWindow
+_fetch_usage_for_profile = usage_service.fetch_usage_for_profile
+_get_usage_url = usage_service.get_usage_url
+_normalize_usage_payload = usage_service.normalize_usage_payload
 
 DEFAULT_CONFIG_ENV_VAR = "CONFIG_FILE_PATH"
 DEFAULT_CONFIG_DIR = Path.home() / ".config/litellm"
@@ -26,151 +33,8 @@ DEFAULT_CONFIG_CANDIDATES = (
 DEFAULT_CONFIG_HELP = (
     "$CONFIG_FILE_PATH, ~/.config/litellm/config.yaml, ~/.config/litellm/config.yml"
 )
-DEFAULT_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 DEFAULT_METRICS_PORT = 9464
 DEFAULT_METRICS_INTERVAL_SECONDS = 300
-
-
-@dataclass
-class UsageWindow:
-    label: str
-    used_percent: float
-    reset_at: Optional[int]
-    limit_seconds: Optional[int] = None
-
-
-@dataclass
-class UsageResult:
-    profile: str
-    account_id: str
-    plan: str
-    credits_balance: Optional[float]
-    windows: List[UsageWindow]
-    status: str
-    error: Optional[str] = None
-
-
-class ChatGPTUsageMetrics:
-    def __init__(self, registry: Any) -> None:
-        from prometheus_client import Gauge
-
-        self.refresh_success = Gauge(
-            "litellm_chatgpt_usage_refresh_success",
-            "Whether the last usage refresh completed successfully.",
-            registry=registry,
-        )
-        self.refresh_timestamp = Gauge(
-            "litellm_chatgpt_usage_refresh_timestamp_seconds",
-            "Unix timestamp of the last usage refresh attempt.",
-            registry=registry,
-        )
-        self.profile_up = Gauge(
-            "litellm_chatgpt_profile_up",
-            "Whether usage data was fetched successfully for the profile.",
-            labelnames=["profile"],
-            registry=registry,
-        )
-        self.credits_balance = Gauge(
-            "litellm_chatgpt_profile_credits_balance",
-            "Current ChatGPT credits balance for the profile.",
-            labelnames=["profile"],
-            registry=registry,
-        )
-        self.window_used_percent = Gauge(
-            "litellm_chatgpt_usage_window_used_percent",
-            "Used percentage for a ChatGPT usage window.",
-            labelnames=["profile", "window"],
-            registry=registry,
-        )
-        self.window_used_ratio = Gauge(
-            "litellm_chatgpt_usage_window_used_ratio",
-            "Used ratio for a ChatGPT usage window.",
-            labelnames=["profile", "window"],
-            registry=registry,
-        )
-        self.window_limit_seconds = Gauge(
-            "litellm_chatgpt_usage_window_limit_seconds",
-            "Configured duration of the ChatGPT usage window in seconds.",
-            labelnames=["profile", "window"],
-            registry=registry,
-        )
-        self.window_reset_timestamp = Gauge(
-            "litellm_chatgpt_usage_window_reset_timestamp_seconds",
-            "Unix timestamp when the ChatGPT usage window resets.",
-            labelnames=["profile", "window"],
-            registry=registry,
-        )
-        self.window_remaining_seconds = Gauge(
-            "litellm_chatgpt_usage_window_remaining_seconds",
-            "Seconds remaining before the ChatGPT usage window resets.",
-            labelnames=["profile", "window"],
-            registry=registry,
-        )
-        self._known_profiles: set[str] = set()
-        self._known_windows: set[tuple[str, str]] = set()
-
-    def update(self, results: List[UsageResult], refreshed_at: Optional[float] = None) -> None:
-        refreshed_at = refreshed_at or time.time()
-        self.refresh_timestamp.set(refreshed_at)
-        self.refresh_success.set(1)
-
-        active_profiles: set[str] = set()
-        active_windows: set[tuple[str, str]] = set()
-
-        for result in results:
-            profile = result.profile
-            active_profiles.add(profile)
-            is_ok = result.status == "ok"
-            self.profile_up.labels(profile=profile).set(1 if is_ok else 0)
-            self.credits_balance.labels(profile=profile).set(
-                result.credits_balance
-                if result.credits_balance is not None
-                else float("nan")
-            )
-
-            for window in result.windows:
-                window_key = (profile, window.label)
-                active_windows.add(window_key)
-                remaining_seconds = (
-                    max(float(window.reset_at) - refreshed_at, 0.0)
-                    if window.reset_at is not None
-                    else float("nan")
-                )
-                self.window_used_percent.labels(profile=profile, window=window.label).set(
-                    window.used_percent
-                )
-                self.window_used_ratio.labels(profile=profile, window=window.label).set(
-                    window.used_percent / 100.0
-                )
-                self.window_limit_seconds.labels(profile=profile, window=window.label).set(
-                    window.limit_seconds
-                    if window.limit_seconds is not None
-                    else float("nan")
-                )
-                self.window_reset_timestamp.labels(profile=profile, window=window.label).set(
-                    float(window.reset_at) if window.reset_at is not None else float("nan")
-                )
-                self.window_remaining_seconds.labels(
-                    profile=profile, window=window.label
-                ).set(remaining_seconds)
-
-        for profile in self._known_profiles - active_profiles:
-            self.profile_up.remove(profile)
-            self.credits_balance.remove(profile)
-
-        for profile, window in self._known_windows - active_windows:
-            self.window_used_percent.remove(profile, window)
-            self.window_used_ratio.remove(profile, window)
-            self.window_limit_seconds.remove(profile, window)
-            self.window_reset_timestamp.remove(profile, window)
-            self.window_remaining_seconds.remove(profile, window)
-
-        self._known_profiles = active_profiles
-        self._known_windows = active_windows
-
-    def mark_refresh_failure(self, refreshed_at: Optional[float] = None) -> None:
-        self.refresh_timestamp.set(refreshed_at or time.time())
-        self.refresh_success.set(0)
 
 
 def _iter_default_config_candidates() -> List[Path]:
@@ -196,44 +60,6 @@ def _resolve_config_path(
     if require_exists and not resolved.exists():
         raise click.ClickException(f"Config not found: {resolved}")
     return resolved
-
-
-def _parse_optional_int(value: Any) -> Optional[int]:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        return int(value)
-    if isinstance(value, str):
-        stripped = value.strip()
-        if stripped.isdigit():
-            return int(stripped)
-    return None
-
-
-def _format_window_label(limit_seconds: Optional[int], default_hours: int) -> str:
-    if limit_seconds is None or limit_seconds <= 0:
-        return f"{default_hours}h"
-    if limit_seconds % 604800 == 0:
-        weeks = limit_seconds // 604800
-        return f"{weeks}w"
-    if limit_seconds % 86400 == 0:
-        days = limit_seconds // 86400
-        return f"{days}d"
-    if limit_seconds % 3600 == 0:
-        hours = limit_seconds // 3600
-        return f"{hours}h"
-    if limit_seconds % 60 == 0:
-        minutes = limit_seconds // 60
-        return f"{minutes}m"
-    return f"{limit_seconds}s"
-
-
-def _get_usage_url() -> str:
-    return str(
-        litellm.get_secret("LITELLM_CHATGPT_USAGE_URL")
-        or litellm.get_secret("CHATGPT_USAGE_URL")
-        or DEFAULT_USAGE_URL
-    )
 
 
 def _load_config_file(config_path: Path) -> Dict[str, Any]:
@@ -400,122 +226,6 @@ def _read_login_session(session_path: Path) -> BrowserLoginSession:
         raise click.ClickException(
             f"Failed reading browser login session {session_path}: {exc}"
         ) from exc
-
-
-def _get_usage_access_token(authenticator: Any, auth_data: Dict[str, Any]) -> str:
-    access_token = auth_data.get("access_token")
-    if access_token and not authenticator._is_token_expired(auth_data, access_token):
-        return access_token
-
-    refresh_token = auth_data.get("refresh_token")
-    if refresh_token:
-        refreshed = authenticator._refresh_tokens(refresh_token)
-        return refreshed["access_token"]
-
-    raise click.ClickException(
-        f"Profile '{authenticator.profile_name}' is not logged in. Run `litellm-chatgpt login {authenticator.profile_name}`."
-    )
-
-
-def _normalize_usage_window(label: str, window_payload: Dict[str, Any]) -> UsageWindow:
-    reset_at = _parse_optional_int(window_payload.get("reset_at"))
-    limit_seconds = _parse_optional_int(window_payload.get("limit_window_seconds"))
-
-    used_percent_raw = window_payload.get("used_percent", 0)
-    try:
-        used_percent = float(used_percent_raw)
-    except (TypeError, ValueError):
-        used_percent = 0.0
-
-    return UsageWindow(
-        label=label,
-        used_percent=max(0.0, min(100.0, used_percent)),
-        reset_at=reset_at,
-        limit_seconds=limit_seconds,
-    )
-
-
-def _normalize_usage_payload(profile: str, account_id: str, payload: Dict[str, Any]) -> UsageResult:
-    plan = str(payload.get("plan_type") or "unknown")
-    credits_balance = None
-    credits = payload.get("credits")
-    if isinstance(credits, dict) and credits.get("balance") is not None:
-        try:
-            credits_balance = float(credits["balance"])
-        except (TypeError, ValueError):
-            credits_balance = None
-
-    windows: List[UsageWindow] = []
-    rate_limit = payload.get("rate_limit")
-    if isinstance(rate_limit, dict):
-        primary = rate_limit.get("primary_window")
-        if isinstance(primary, dict):
-            windows.append(
-                _normalize_usage_window(
-                    _format_window_label(
-                        _parse_optional_int(primary.get("limit_window_seconds")),
-                        default_hours=3,
-                    ),
-                    primary,
-                )
-            )
-        secondary = rate_limit.get("secondary_window")
-        if isinstance(secondary, dict):
-            windows.append(
-                _normalize_usage_window(
-                    _format_window_label(
-                        _parse_optional_int(secondary.get("limit_window_seconds")),
-                        default_hours=24,
-                    ),
-                    secondary,
-                )
-            )
-
-    return UsageResult(
-        profile=profile,
-        account_id=account_id,
-        plan=plan,
-        credits_balance=credits_balance,
-        windows=windows,
-        status="ok",
-    )
-
-
-def _fetch_usage_for_profile(profile: str, usage_url: str) -> UsageResult:
-    authenticator, _, auth_data = _load_auth_data(profile)
-    account_id = auth_data.get("account_id") or authenticator.get_account_id() or ""
-    access_token = _get_usage_access_token(authenticator, auth_data)
-
-    client = _get_httpx_client()
-    response = client.get(
-        usage_url,
-        headers={
-            "Authorization": f"Bearer {access_token}",
-            "User-Agent": "litellm-chatgpt",
-            "Accept": "application/json",
-            **(
-                {"ChatGPT-Account-Id": account_id}
-                if account_id
-                else {}
-            ),
-        },
-    )
-    try:
-        response.raise_for_status()
-    except Exception as exc:
-        body_text = response.text.strip() if response.text else str(exc)
-        return UsageResult(
-            profile=profile,
-            account_id=account_id,
-            plan="N/A",
-            credits_balance=None,
-            windows=[],
-            status="error",
-            error=f"usage request failed ({response.status_code}): {body_text}",
-        )
-
-    payload = response.json()
-    return _normalize_usage_payload(profile, account_id, payload)
 
 
 def _format_account(account_id: str) -> str:

@@ -116,9 +116,13 @@ from litellm.router_utils.handle_error import (
 from litellm.router_utils.pre_call_checks.deployment_affinity_check import (
     DeploymentAffinityCheck,
 )
+from litellm.router_utils.pre_call_checks.chatgpt_usage_health_check import (
+    ChatGPTUsageHealthCheck,
+)
 from litellm.router_utils.pre_call_checks.model_rate_limit_check import (
     ModelRateLimitingCheck,
 )
+from litellm.llms.chatgpt.usage_service import ChatGPTUsageService
 from litellm.router_utils.pre_call_checks.prompt_caching_deployment_check import (
     PromptCachingDeploymentCheck,
 )
@@ -1338,6 +1342,10 @@ class Router:
                 )
             elif pre_call_check == "enforce_model_rate_limits":
                 _callback = ModelRateLimitingCheck(dual_cache=self.cache)
+            elif pre_call_check == "chatgpt_usage_health_check":
+                _callback = ChatGPTUsageHealthCheck(
+                    usage_service=ChatGPTUsageService(),
+                )
 
             if _callback is None:
                 continue
@@ -6454,7 +6462,19 @@ class Router:
         - Rate Limit Exception - If the deployment is over it's tpm/rpm limits
         """
         returned_healthy_deployments = healthy_deployments
-        for _callback in litellm.callbacks:
+        callback_filters = [
+            _callback
+            for _callback in litellm.callbacks
+            if isinstance(_callback, CustomLogger)
+        ]
+        callback_filters.sort(
+            key=lambda callback: 0
+            if isinstance(callback, ChatGPTUsageHealthCheck)
+            else 1
+            if isinstance(callback, DeploymentAffinityCheck)
+            else 2
+        )
+        for _callback in callback_filters:
             if isinstance(_callback, CustomLogger):
                 try:
                     returned_healthy_deployments = (

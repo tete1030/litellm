@@ -349,6 +349,11 @@ def test_chatgpt_usage_metrics_exporter_updates_prometheus_gauges() -> None:
                 profile="buy2",
                 account_id="acct-buy2-1234",
                 plan="plus",
+                account_type="plus",
+                has_active_subscription=True,
+                subscription_expires_at=1779267024,
+                subscription_renews_at=1779177024,
+                effective_available=True,
                 credits_balance=12.5,
                 windows=[
                     UsageWindow(
@@ -372,6 +377,11 @@ def test_chatgpt_usage_metrics_exporter_updates_prometheus_gauges() -> None:
 
     payload = generate_latest(registry).decode("utf-8")
     assert 'litellm_chatgpt_profile_up{profile="buy2"} 1.0' in payload
+    assert 'litellm_chatgpt_profile_available{profile="buy2"} 1.0' in payload
+    assert 'litellm_chatgpt_profile_has_active_subscription{profile="buy2"} 1.0' in payload
+    assert 'litellm_chatgpt_profile_subscription_expires_timestamp_seconds{profile="buy2"} 1.779267024e+09' in payload
+    assert 'litellm_chatgpt_profile_subscription_renews_timestamp_seconds{profile="buy2"} 1.779177024e+09' in payload
+    assert 'litellm_chatgpt_profile_plan_info{account_type="plus",profile="buy2"} 1.0' in payload
     assert (
         'litellm_chatgpt_usage_window_limit_seconds{profile="buy2",window="5h"} 18000.0'
         in payload

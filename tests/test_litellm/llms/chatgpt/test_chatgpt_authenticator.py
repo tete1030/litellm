@@ -5,8 +5,9 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 
 import litellm
@@ -19,6 +20,7 @@ from litellm.llms.chatgpt.authenticator import (
 from litellm.llms.chatgpt.common_utils import (
     ChatGPTAuthProfileError,
     GetAccessTokenError,
+    RefreshAccessTokenError,
 )
 from litellm.types.router import GenericLiteLLMParams
 
@@ -256,3 +258,25 @@ class TestChatGPTAuthenticator:
 
         assert results[0] == results[1]
         assert refresh_call_count == 1
+
+    def test_refresh_token_error_includes_profile_name(self, tmp_path):
+        litellm.chatgpt_auth_profiles = {
+            "account-a": {"token_dir": str(tmp_path / "account-a")}
+        }
+        authenticator = get_chatgpt_authenticator(
+            {"chatgpt_auth_profile": "account-a"}
+        )
+        request = httpx.Request("POST", "https://auth.openai.com/oauth/token")
+        response = httpx.Response(401, request=request)
+        client = MagicMock()
+        client.post.return_value = response
+
+        with patch(
+            "litellm.llms.chatgpt.authenticator._get_httpx_client",
+            return_value=client,
+        ):
+            with pytest.raises(
+                RefreshAccessTokenError,
+                match="Refresh token failed for profile 'account-a'",
+            ):
+                authenticator._refresh_tokens("refresh-123")
