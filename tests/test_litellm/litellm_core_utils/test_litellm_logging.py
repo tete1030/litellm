@@ -222,6 +222,20 @@ class TestUpdateFromKwargs:
 
         assert logging_obj.litellm_params["metadata"] == lm_meta
 
+    def test_backfills_top_level_model_info_from_metadata(self, logging_obj):
+        metadata = {"model_info": {"id": "deploy-from-metadata"}}
+
+        logging_obj.update_from_kwargs(kwargs={"metadata": metadata})
+
+        assert logging_obj.litellm_params["model_info"] == metadata["model_info"]
+
+    def test_backfills_top_level_model_info_from_litellm_metadata(self, logging_obj):
+        lm_meta = {"model_info": {"id": "deploy-from-litellm-metadata"}}
+
+        logging_obj.update_from_kwargs(kwargs={"litellm_metadata": lm_meta})
+
+        assert logging_obj.litellm_params["model_info"] == lm_meta["model_info"]
+
     def test_no_backfill_when_metadata_already_present(self, logging_obj):
         metadata = {"user_api_key": "sk-real"}
         lm_meta = {"model_info": {"id": "deploy-1"}}

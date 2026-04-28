@@ -66,9 +66,62 @@ async def test_async_post_call_failure_hook_includes_client_ip_user_agent():
                     found = True
                     break
 
-        assert (
-            found
-        ), "UserAPIKeyLabelValues should contain client_ip='127.0.0.1' and user_agent='test-agent'"
+    assert (
+        found
+    ), "UserAPIKeyLabelValues should contain client_ip='127.0.0.1' and user_agent='test-agent'"
+
+
+@pytest.mark.asyncio
+async def test_async_post_call_failure_hook_reads_model_id_from_litellm_metadata():
+    with patch(
+        "litellm.integrations.prometheus.PrometheusLogger.__init__", return_value=None
+    ):
+        logger = PrometheusLogger()
+        logger.litellm_proxy_failed_requests_metric = MagicMock()
+        logger.litellm_proxy_total_requests_metric = MagicMock()
+        logger.get_labels_for_metric = MagicMock(
+            return_value=["model_id", "client_ip", "user_agent"]
+        )
+
+    request_data = {
+        "model": "gpt-5.3-codex",
+        "litellm_metadata": {
+            "model_info": {"id": "chatgpt-buy4-bus-codex"},
+            "requester_ip_address": "10.0.0.1",
+            "user_agent": "codex-test",
+        },
+    }
+    user_api_key_dict = UserAPIKeyAuth(token="test_token")
+    original_exception = Exception("Test exception")
+
+    with patch(
+        "litellm.integrations.prometheus.prometheus_label_factory"
+    ) as mock_label_factory:
+        mock_label_factory.return_value = {}
+
+        await logger.async_post_call_failure_hook(
+            request_data=request_data,
+            original_exception=original_exception,
+            user_api_key_dict=user_api_key_dict,
+        )
+
+        calls = mock_label_factory.call_args_list
+        found = False
+        for call in calls:
+            enum_values = call.kwargs.get("enum_values")
+            if isinstance(enum_values, UserAPIKeyLabelValues):
+                if (
+                    enum_values.model_id == "chatgpt-buy4-bus-codex"
+                    and enum_values.client_ip == "10.0.0.1"
+                    and enum_values.user_agent == "codex-test"
+                ):
+                    found = True
+                    break
+
+        assert found, (
+            "UserAPIKeyLabelValues should contain model_id and request metadata "
+            "from litellm_metadata when metadata is absent"
+        )
 
 
 @pytest.mark.asyncio

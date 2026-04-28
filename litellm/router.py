@@ -6075,7 +6075,14 @@ class Router:
 
             # Cache litellm_params to avoid repeated dict lookups
             litellm_params = kwargs.get("litellm_params", {})
-            _model_info = litellm_params.get("model_info", {})
+            _model_info = litellm_params.get("model_info") or {}
+            if not isinstance(_model_info, dict) or _model_info.get("id") is None:
+                _metadata = (
+                    litellm_params.get("metadata")
+                    or litellm_params.get("litellm_metadata")
+                    or {}
+                )
+                _model_info = (_metadata.get("model_info") or {}) if isinstance(_metadata, dict) else {}
 
             exception_headers = litellm.litellm_core_utils.exception_mapping_utils._get_response_headers(
                 original_exception=exception
@@ -6138,7 +6145,14 @@ class Router:
             "deployment", None
         )  # handles wildcard routes - by giving the original name sent to `litellm.completion`
         model_group = kwargs["litellm_params"]["metadata"].get("model_group", None)
-        model_info = kwargs["litellm_params"].get("model_info", {}) or {}
+        model_info = kwargs["litellm_params"].get("model_info") or {}
+        if not isinstance(model_info, dict) or model_info.get("id") is None:
+            _metadata = (
+                kwargs["litellm_params"].get("metadata")
+                or kwargs["litellm_params"].get("litellm_metadata")
+                or {}
+            )
+            model_info = (_metadata.get("model_info") or {}) if isinstance(_metadata, dict) else {}
         id = model_info.get("id", None)
         if model_group is None or id is None:
             return

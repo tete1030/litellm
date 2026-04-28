@@ -593,6 +593,67 @@ def test_deployment_callback_respects_cooldown_time(model_list):
         assert mock_set.call_args.kwargs["time_to_cooldown"] == 0
 
 
+def test_deployment_callback_on_failure_reads_model_info_from_metadata(model_list):
+    import time
+    from unittest.mock import patch
+
+    router = Router(model_list=model_list)
+
+    class FakeException(Exception):
+        def __init__(self):
+            self.status_code = 429
+
+    kwargs = {
+        "exception": FakeException(),
+        "litellm_params": {
+            "metadata": {
+                "model_group": "gpt-3.5-turbo",
+                "model_info": {"id": 100},
+            },
+        },
+    }
+
+    with patch("litellm.router._set_cooldown_deployments") as mock_set:
+        router.deployment_callback_on_failure(
+            kwargs=kwargs,
+            completion_response=None,
+            start_time=time.time(),
+            end_time=time.time(),
+        )
+
+    mock_set.assert_called_once()
+    assert mock_set.call_args.kwargs["deployment"] == 100
+
+
+@pytest.mark.asyncio
+async def test_async_deployment_callback_on_failure_reads_model_info_from_metadata(model_list):
+    import time
+
+    router = Router(model_list=model_list)
+    kwargs = {
+        "litellm_params": {
+            "metadata": {
+                "deployment": "gpt-3.5-turbo",
+                "model_group": "gpt-3.5-turbo",
+                "model_info": {"id": 100},
+            },
+        },
+    }
+
+    model_response = router.completion(
+        model="gpt-3.5-turbo",
+        messages=[{"role": "user", "content": "Hello, how are you?"}],
+        mock_response="I'm fine, thank you!",
+    )
+
+    await router.async_deployment_callback_on_failure(
+        kwargs=kwargs,
+        completion_response=model_response,
+        start_time=time.time(),
+        end_time=time.time(),
+    )
+
+
 def test_log_retry(model_list):
     """Test if the '_log_retry' function is working correctly"""
     import time

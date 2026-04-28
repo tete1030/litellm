@@ -593,6 +593,15 @@ class Logging(LiteLLMLoggingBaseClass):
             if "metadata" not in base_litellm_params:
                 base_litellm_params["metadata"] = kwargs["litellm_metadata"].copy()
 
+        model_info = kwargs.get("model_info")
+        if not isinstance(model_info, dict):
+            model_info = (
+                (base_litellm_params.get("metadata") or {}).get("model_info")
+                or (base_litellm_params.get("litellm_metadata") or {}).get("model_info")
+            )
+        if isinstance(model_info, dict) and "model_info" not in base_litellm_params:
+            base_litellm_params["model_info"] = model_info
+
         if litellm_params:
             base_litellm_params.update(litellm_params)
 

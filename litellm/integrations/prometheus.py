@@ -1609,9 +1609,13 @@ class PrometheusLogger(CustomLogger):
                 proxy_server_request=request_data.get("proxy_server_request", {}),
             )
             _metadata = request_data.get("metadata", {}) or {}
-            model_id = _metadata.get("model_info", {}).get("id") or request_data.get(
-                "model_info", {}
-            ).get("id")
+            _litellm_metadata = request_data.get("litellm_metadata", {}) or {}
+            _request_context = _metadata or _litellm_metadata
+            model_id = (
+                _metadata.get("model_info", {}).get("id")
+                or _litellm_metadata.get("model_info", {}).get("id")
+                or request_data.get("model_info", {}).get("id")
+            )
             enum_values = UserAPIKeyLabelValues(
                 end_user=user_api_key_dict.end_user_id,
                 user=user_api_key_dict.user_id,
@@ -1626,8 +1630,8 @@ class PrometheusLogger(CustomLogger):
                 exception_class=self._get_exception_class_name(original_exception),
                 tags=_tags,
                 route=user_api_key_dict.request_route,
-                client_ip=_metadata.get("requester_ip_address"),
-                user_agent=_metadata.get("user_agent"),
+                client_ip=_request_context.get("requester_ip_address"),
+                user_agent=_request_context.get("user_agent"),
                 model_id=model_id,
                 stream=str(request_data.get("stream"))
                 if litellm.prometheus_emit_stream_label
