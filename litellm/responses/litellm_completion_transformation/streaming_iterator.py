@@ -107,6 +107,20 @@ class LiteLLMCompletionStreamingIterator(ResponsesAPIStreamingIterator):
         self._reasoning_done_emitted = False
         self._reasoning_item_id: Optional[str] = None
         self._accumulated_reasoning_content_parts: List[str] = []
+        self._completed_output_items: List[Any] = []
+
+    def _remember_completed_output_item(self, item: Any) -> None:
+        if item is None:
+            return
+        self._completed_output_items.append(item)
+
+    def _backfill_response_output_from_done_events(
+        self, response: ResponsesAPIResponse
+    ) -> ResponsesAPIResponse:
+        output = getattr(response, "output", None)
+        if (output is None or output == []) and self._completed_output_items:
+            response.output = list(self._completed_output_items)
+        return response
 
     def _get_or_assign_tool_output_index(self, call_id: str) -> int:
         existing = self._tool_output_index_by_call_id.get(call_id)
@@ -342,20 +356,22 @@ class LiteLLMCompletionStreamingIterator(ResponsesAPIStreamingIterator):
             self._pending_tool_events.append(done_event)
 
             self._sequence_number += 1
+            item = BaseLiteLLMOpenAIResponseObject(
+                **{
+                    "type": "function_call",
+                    "id": call_id,
+                    "call_id": call_id,
+                    "name": fn_name,
+                    "arguments": final_args,
+                    "status": "completed",
+                }
+            )
+            self._remember_completed_output_item(item)
             item_done_event = OutputItemDoneEvent(
                 type=ResponsesAPIStreamEvents.OUTPUT_ITEM_DONE,
                 output_index=output_index,
                 sequence_number=self._sequence_number,
-                item=BaseLiteLLMOpenAIResponseObject(
-                    **{
-                        "type": "function_call",
-                        "id": call_id,
-                        "call_id": call_id,
-                        "name": fn_name,
-                        "arguments": final_args,
-                        "status": "completed",
-                    }
-                ),
+                item=item,
             )
             self._pending_tool_events.append(item_done_event)
 
@@ -635,25 +651,27 @@ class LiteLLMCompletionStreamingIterator(ResponsesAPIStreamingIterator):
         response_annotations = LiteLLMCompletionResponsesConfig._transform_chat_completion_annotations_to_response_output_annotations(
             annotations=annotations
         )
+        item = BaseLiteLLMOpenAIResponseObject(
+            **{
+                "id": self._cached_item_id,
+                "status": "completed",
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": text,
+                        "annotations": response_annotations,
+                    }
+                ],
+            }
+        )
+        self._remember_completed_output_item(item)
         return OutputItemDoneEvent(
             type=ResponsesAPIStreamEvents.OUTPUT_ITEM_DONE,
             output_index=0,
             sequence_number=1,
-            item=BaseLiteLLMOpenAIResponseObject(
-                **{
-                    "id": self._cached_item_id,
-                    "status": "completed",
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [
-                        {
-                            "type": "output_text",
-                            "text": text,
-                            "annotations": response_annotations,
-                        }
-                    ],
-                }
-            ),
+            item=item,
         )
 
     def create_reasoning_output_item_done_event(
@@ -682,22 +700,24 @@ class LiteLLMCompletionStreamingIterator(ResponsesAPIStreamingIterator):
             }
         }
         """
+        item = BaseLiteLLMOpenAIResponseObject(
+            **{
+                "id": reasoning_item_id,
+                "type": "reasoning",
+                "summary": [
+                    {
+                        "type": "summary_text",
+                        "text": reasoning_content,
+                    }
+                ],
+            }
+        )
+        self._remember_completed_output_item(item)
         return OutputItemDoneEvent(
             type=ResponsesAPIStreamEvents.OUTPUT_ITEM_DONE,
             output_index=0,
             sequence_number=sequence_number,
-            item=BaseLiteLLMOpenAIResponseObject(
-                **{
-                    "id": reasoning_item_id,
-                    "type": "reasoning",
-                    "summary": [
-                        {
-                            "type": "summary_text",
-                            "text": reasoning_content,
-                        }
-                    ],
-                }
-            ),
+            item=item,
         )
 
     def return_default_done_events(
@@ -1127,6 +1147,10 @@ class LiteLLMCompletionStreamingIterator(ResponsesAPIStreamingIterator):
             # Use the cached response ID to ensure consistency across all events
             if self._cached_response_id:
                 responses_api_response.id = self._cached_response_id
+
+            responses_api_response = self._backfill_response_output_from_done_events(
+                responses_api_response
+            )
 
             # Encode the response ID to match non-streaming behavior
             encoded_response = ResponsesAPIRequestUtils._update_responses_api_response_id_with_model_id(

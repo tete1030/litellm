@@ -1775,6 +1775,62 @@ class TestStreamingIDConsistency:
         assert iterator._cached_item_id is not None
         assert iterator._cached_item_id == text_done_id
 
+    def test_response_completed_backfills_output_from_done_items(self):
+        from unittest.mock import Mock, patch
+
+        import litellm
+        from litellm.responses.litellm_completion_transformation.streaming_iterator import (
+            LiteLLMCompletionStreamingIterator,
+        )
+        from litellm.types.llms.openai import ResponsesAPIResponse
+        from litellm.types.utils import Choices, Message, ModelResponse
+
+        mock_stream_wrapper = Mock(spec=litellm.CustomStreamWrapper)
+        mock_logging_obj = Mock()
+        mock_stream_wrapper.logging_obj = mock_logging_obj
+        mock_logging_obj._response_cost_calculator = Mock(return_value=0.001)
+
+        iterator = LiteLLMCompletionStreamingIterator(
+            model="gemini/gemini-2.5-flash-lite",
+            litellm_custom_stream_wrapper=mock_stream_wrapper,
+            request_input="Test",
+            responses_api_request={},
+        )
+
+        complete_response = ModelResponse(
+            id="test-response-id",
+            created=1234567890,
+            model="gemini-2.5-flash-lite",
+            object="chat.completion",
+            choices=[
+                Choices(
+                    finish_reason="stop",
+                    index=0,
+                    message=Message(content="Hello World", role="assistant"),
+                )
+            ],
+        )
+        iterator.litellm_model_response = complete_response
+
+        item_done_event = iterator.create_output_item_done_event(complete_response)
+
+        with patch(
+            "litellm.responses.litellm_completion_transformation.streaming_iterator.LiteLLMCompletionResponsesConfig.transform_chat_completion_response_to_responses_api_response",
+            return_value=ResponsesAPIResponse.model_construct(
+                id="resp_raw",
+                object="response",
+                created_at=1234567890,
+                model="gemini-2.5-flash-lite",
+                status="completed",
+                output=None,
+            ),
+        ):
+            completed_event = iterator._emit_response_completed_event(complete_response)
+
+        assert completed_event is not None
+        assert completed_event.response.output is not None
+        assert completed_event.response.output[0] == item_done_event.item
+
     def test_parallel_tool_calls_merged_into_single_assistant_message(self):
         """
         Regression test: multi-turn parallel tool calls via the Responses API must
