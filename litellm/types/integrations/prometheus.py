@@ -202,6 +202,10 @@ DEFINED_PROMETHEUS_METRICS = Literal[
     "litellm_total_tokens_metric",
     "litellm_input_tokens_metric",
     "litellm_output_tokens_metric",
+    "litellm_prompt_cache_hit_requests_metric",
+    "litellm_prompt_cache_miss_requests_metric",
+    "litellm_prompt_cached_input_tokens_metric",
+    "litellm_prompt_uncached_input_tokens_metric",
     "litellm_deployment_successful_fallbacks",
     "litellm_deployment_failed_fallbacks",
     "litellm_remaining_team_budget_metric",
@@ -436,6 +440,14 @@ class PrometheusMetricLabels:
         UserAPIKeyLabelNames.REQUESTED_MODEL.value,
         UserAPIKeyLabelNames.MODEL_ID.value,
     ]
+
+    litellm_prompt_cache_hit_requests_metric = litellm_input_tokens_metric
+
+    litellm_prompt_cache_miss_requests_metric = litellm_input_tokens_metric
+
+    litellm_prompt_cached_input_tokens_metric = litellm_input_tokens_metric
+
+    litellm_prompt_uncached_input_tokens_metric = litellm_input_tokens_metric
 
     litellm_deployment_state = [
         UserAPIKeyLabelNames.v2_LITELLM_MODEL_NAME.value,

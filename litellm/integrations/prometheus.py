@@ -155,6 +155,30 @@ class PrometheusLogger(CustomLogger):
                 labelnames=self.get_labels_for_metric("litellm_output_tokens_metric"),
             )
 
+            self.litellm_prompt_cache_hit_requests_metric = self._counter_factory(
+                "litellm_prompt_cache_hit_requests_metric",
+                "Total prompt-bearing requests with provider-reported cached input tokens",
+                labelnames=self.get_labels_for_metric("litellm_prompt_cache_hit_requests_metric"),
+            )
+
+            self.litellm_prompt_cache_miss_requests_metric = self._counter_factory(
+                "litellm_prompt_cache_miss_requests_metric",
+                "Total prompt-bearing requests without provider-reported cached input tokens",
+                labelnames=self.get_labels_for_metric("litellm_prompt_cache_miss_requests_metric"),
+            )
+
+            self.litellm_prompt_cached_input_tokens_metric = self._counter_factory(
+                "litellm_prompt_cached_input_tokens_metric",
+                "Total provider-reported cached input tokens",
+                labelnames=self.get_labels_for_metric("litellm_prompt_cached_input_tokens_metric"),
+            )
+
+            self.litellm_prompt_uncached_input_tokens_metric = self._counter_factory(
+                "litellm_prompt_uncached_input_tokens_metric",
+                "Total input tokens not served from provider prompt cache",
+                labelnames=self.get_labels_for_metric("litellm_prompt_uncached_input_tokens_metric"),
+            )
+
             # Remaining Budget for Team
             self.litellm_remaining_team_budget_metric = self._gauge_factory(
                 "litellm_remaining_team_budget_metric",
@@ -1123,6 +1147,76 @@ class PrometheusLogger(CustomLogger):
         self.litellm_output_tokens_metric.labels(**_labels).inc(
             standard_logging_payload["completion_tokens"]
         )
+
+        self._increment_prompt_cache_usage_metrics(
+            standard_logging_payload=standard_logging_payload,
+            enum_values=enum_values,
+        )
+
+    @staticmethod
+    def _extract_prompt_cache_usage(
+        standard_logging_payload: StandardLoggingPayload,
+    ) -> Tuple[int, int, int]:
+        usage_object: Any = standard_logging_payload.get("usage_object")
+        if not isinstance(usage_object, dict):
+            metadata = standard_logging_payload.get("metadata")
+            if isinstance(metadata, dict):
+                usage_object = metadata.get("usage_object")
+
+        prompt_tokens = standard_logging_payload.get("prompt_tokens", 0) or 0
+        if not isinstance(prompt_tokens, (int, float)) and isinstance(usage_object, dict):
+            prompt_tokens = usage_object.get("prompt_tokens", 0) or 0
+
+        try:
+            prompt_tokens = int(prompt_tokens)
+        except (TypeError, ValueError):
+            prompt_tokens = 0
+
+        cached_tokens = 0
+        if isinstance(usage_object, dict):
+            prompt_details = usage_object.get("prompt_tokens_details")
+            if isinstance(prompt_details, dict):
+                cached_tokens = prompt_details.get("cached_tokens", 0) or 0
+
+        try:
+            cached_tokens = int(cached_tokens)
+        except (TypeError, ValueError):
+            cached_tokens = 0
+
+        cached_tokens = max(0, min(cached_tokens, prompt_tokens))
+        uncached_tokens = max(0, prompt_tokens - cached_tokens)
+        return prompt_tokens, cached_tokens, uncached_tokens
+
+    def _increment_prompt_cache_usage_metrics(
+        self,
+        standard_logging_payload: StandardLoggingPayload,
+        enum_values: UserAPIKeyLabelValues,
+    ) -> None:
+        prompt_tokens, cached_tokens, uncached_tokens = self._extract_prompt_cache_usage(
+            standard_logging_payload=standard_logging_payload
+        )
+        if prompt_tokens <= 0:
+            return
+
+        _labels = prometheus_label_factory(
+            supported_enum_labels=self.get_labels_for_metric(
+                metric_name="litellm_prompt_cache_hit_requests_metric"
+            ),
+            enum_values=enum_values,
+        )
+
+        if cached_tokens > 0:
+            self.litellm_prompt_cache_hit_requests_metric.labels(**_labels).inc()
+            self.litellm_prompt_cached_input_tokens_metric.labels(**_labels).inc(
+                cached_tokens
+            )
+        else:
+            self.litellm_prompt_cache_miss_requests_metric.labels(**_labels).inc()
+
+        if uncached_tokens > 0:
+            self.litellm_prompt_uncached_input_tokens_metric.labels(**_labels).inc(
+                uncached_tokens
+            )
 
     def _increment_cache_metrics(
         self,
