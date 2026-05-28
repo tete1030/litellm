@@ -111,6 +111,160 @@ class TestBaseResponsesAPIStreamingIterator:
             # Verify the response was updated on the event
             assert result.response == updated_response
 
+
+    def test_process_chunk_backfills_missing_completed_output_from_done_items(self):
+        mock_response = Mock()
+        mock_response.headers = {}
+        mock_logging_obj = Mock(spec=LiteLLMLoggingObj)
+        mock_logging_obj.model_call_details = {"litellm_params": {}}
+        mock_config = Mock(spec=BaseResponsesAPIConfig)
+
+        done_item = {
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "Recovered text", "annotations": []}],
+        }
+        completed_payload = {
+            "id": "resp_123",
+            "output": None,
+            "status": "completed",
+        }
+
+        mock_done_event = Mock()
+        mock_done_event.type = ResponsesAPIStreamEvents.OUTPUT_ITEM_DONE
+        mock_done_event.item = done_item
+
+        mock_completed_response = Mock(spec=ResponsesAPIResponse)
+        mock_completed_response.id = "resp_123"
+        mock_completed_response.output = None
+        mock_completed_event = Mock(spec=ResponseCompletedEvent)
+        mock_completed_event.type = ResponsesAPIStreamEvents.RESPONSE_COMPLETED
+        mock_completed_event.response = mock_completed_response
+
+        def _transform_streaming_response(**kwargs):
+            parsed_chunk = kwargs["parsed_chunk"]
+            if parsed_chunk["type"] == ResponsesAPIStreamEvents.OUTPUT_ITEM_DONE:
+                return mock_done_event
+            assert parsed_chunk["response"]["output"] == [done_item]
+            return mock_completed_event
+
+        mock_config.transform_streaming_response.side_effect = _transform_streaming_response
+
+        iterator = BaseResponsesAPIStreamingIterator(
+            response=mock_response,
+            model="gpt-4",
+            responses_api_provider_config=mock_config,
+            logging_obj=mock_logging_obj,
+            litellm_metadata={"model_info": {"id": "model_123"}},
+            custom_llm_provider="openai",
+        )
+
+        with patch.object(
+            ResponsesAPIRequestUtils,
+            "_update_responses_api_response_id_with_model_id",
+            return_value=mock_completed_response,
+        ):
+            iterator._process_chunk(
+                json.dumps(
+                    {
+                        "type": "response.output_item.done",
+                        "output_index": 0,
+                        "item": done_item,
+                    }
+                )
+            )
+            result = iterator._process_chunk(
+                json.dumps(
+                    {
+                        "type": "response.completed",
+                        "response": completed_payload,
+                    }
+                )
+            )
+
+        assert result is mock_completed_event
+
+    def test_process_chunk_preserves_existing_completed_output(self):
+        mock_response = Mock()
+        mock_response.headers = {}
+        mock_logging_obj = Mock(spec=LiteLLMLoggingObj)
+        mock_logging_obj.model_call_details = {"litellm_params": {}}
+        mock_config = Mock(spec=BaseResponsesAPIConfig)
+
+        done_item = {
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "Stale text", "annotations": []}],
+        }
+        authoritative_output = [
+            {
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "Authoritative text", "annotations": []}],
+            }
+        ]
+
+        mock_done_event = Mock()
+        mock_done_event.type = ResponsesAPIStreamEvents.OUTPUT_ITEM_DONE
+        mock_done_event.item = done_item
+
+        mock_completed_response = Mock(spec=ResponsesAPIResponse)
+        mock_completed_response.id = "resp_456"
+        mock_completed_response.output = authoritative_output
+        mock_completed_event = Mock(spec=ResponseCompletedEvent)
+        mock_completed_event.type = ResponsesAPIStreamEvents.RESPONSE_COMPLETED
+        mock_completed_event.response = mock_completed_response
+
+        def _transform_streaming_response(**kwargs):
+            parsed_chunk = kwargs["parsed_chunk"]
+            if parsed_chunk["type"] == ResponsesAPIStreamEvents.OUTPUT_ITEM_DONE:
+                return mock_done_event
+            assert parsed_chunk["response"]["output"] == authoritative_output
+            return mock_completed_event
+
+        mock_config.transform_streaming_response.side_effect = _transform_streaming_response
+
+        iterator = BaseResponsesAPIStreamingIterator(
+            response=mock_response,
+            model="gpt-4",
+            responses_api_provider_config=mock_config,
+            logging_obj=mock_logging_obj,
+            litellm_metadata={"model_info": {"id": "model_123"}},
+            custom_llm_provider="openai",
+        )
+
+        with patch.object(
+            ResponsesAPIRequestUtils,
+            "_update_responses_api_response_id_with_model_id",
+            return_value=mock_completed_response,
+        ):
+            iterator._process_chunk(
+                json.dumps(
+                    {
+                        "type": "response.output_item.done",
+                        "output_index": 0,
+                        "item": done_item,
+                    }
+                )
+            )
+            result = iterator._process_chunk(
+                json.dumps(
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": "resp_456",
+                            "output": authoritative_output,
+                            "status": "completed",
+                        },
+                    }
+                )
+            )
+
+        assert result is mock_completed_event
+
     def test_process_chunk_with_delta_event_no_id_update(self):
         """
         Test that _process_chunk correctly processes a delta event

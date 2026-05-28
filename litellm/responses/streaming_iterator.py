@@ -62,6 +62,8 @@ class BaseResponsesAPIStreamingIterator:
         self.start_time = getattr(logging_obj, "start_time", datetime.now())
         self._failure_handled = False  # Track if failure handler has been called
         self._stream_created_time: float = time.time()
+        self._completed_output_items_by_index: Dict[int, Dict[str, Any]] = {}
+        self._completed_output_items_without_index: List[Dict[str, Any]] = []
 
         # track request context for hooks
         self.litellm_metadata = litellm_metadata
@@ -101,6 +103,61 @@ class BaseResponsesAPIStreamingIterator:
                 llm_provider=self.custom_llm_provider or "",
             )
 
+    def _remember_completed_output_item(self, parsed_chunk: Dict[str, Any]) -> None:
+        if parsed_chunk.get("type") != ResponsesAPIStreamEvents.OUTPUT_ITEM_DONE:
+            return
+
+        item = parsed_chunk.get("item")
+        if not isinstance(item, dict):
+            return
+
+        item_copy = dict(item)
+        output_index = parsed_chunk.get("output_index")
+        if output_index is None:
+            self._completed_output_items_without_index.append(item_copy)
+            return
+
+        try:
+            normalized_index = int(output_index)
+        except (TypeError, ValueError):
+            self._completed_output_items_without_index.append(item_copy)
+            return
+
+        self._completed_output_items_by_index[normalized_index] = item_copy
+
+    def _backfill_completed_response_output(
+        self, parsed_chunk: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        if parsed_chunk.get("type") != ResponsesAPIStreamEvents.RESPONSE_COMPLETED:
+            return parsed_chunk
+
+        response_payload = parsed_chunk.get("response")
+        if not isinstance(response_payload, dict):
+            return parsed_chunk
+
+        existing_output = response_payload.get("output")
+        if existing_output not in (None, []):
+            return parsed_chunk
+
+        output_items = [
+            item
+            for _, item in sorted(self._completed_output_items_by_index.items())
+        ]
+        if self._completed_output_items_without_index:
+            output_items.extend(self._completed_output_items_without_index)
+        if not output_items:
+            return parsed_chunk
+
+        updated_chunk = dict(parsed_chunk)
+        updated_response = dict(response_payload)
+        updated_response["output"] = output_items
+        updated_chunk["response"] = updated_response
+        return updated_chunk
+
+    def _clear_completed_output_items(self) -> None:
+        self._completed_output_items_by_index.clear()
+        self._completed_output_items_without_index.clear()
+
     def _process_chunk(self, chunk) -> Optional[ResponsesAPIStreamingResponse]:
         """Process a single chunk of data from the stream"""
         if not chunk:
@@ -122,6 +179,8 @@ class BaseResponsesAPIStreamingIterator:
 
             # Format as ResponsesAPIStreamingResponse
             if isinstance(parsed_chunk, dict):
+                self._remember_completed_output_item(parsed_chunk)
+                parsed_chunk = self._backfill_completed_response_output(parsed_chunk)
                 openai_responses_api_chunk = (
                     self.responses_api_provider_config.transform_streaming_response(
                         model=self.model,
@@ -199,6 +258,7 @@ class BaseResponsesAPIStreamingIterator:
                                     pass
 
                     self._handle_logging_completed_response()
+                    self._clear_completed_output_items()
 
                 return openai_responses_api_chunk
 
