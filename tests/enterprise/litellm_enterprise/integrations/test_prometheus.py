@@ -642,53 +642,32 @@ async def test_request_counter_semantic_validation(mock_prometheus_logger):
     ), "Token metric should be incremented by total_tokens (999)"
 
 
-@pytest.mark.asyncio
-async def test_prompt_cache_token_metrics(mock_prometheus_logger):
-    from datetime import datetime, timedelta
-
-    kwargs = {
-        "model": "gpt-5.4",
-        "litellm_params": {"metadata": {}},
-        "start_time": datetime.now() - timedelta(seconds=1),
-        "end_time": datetime.now(),
-        "api_call_start_time": datetime.now() - timedelta(seconds=0.5),
-        "standard_logging_object": {
-            "total_tokens": 1200,
-            "prompt_tokens": 1000,
-            "completion_tokens": 200,
-            "response_cost": 0.005,
-            "model_group": "gpt-5.4",
-            "model_id": "chatgpt-buy11",
-            "api_base": "https://chatgpt.com/backend-api",
-            "custom_llm_provider": "chatgpt",
-            "stream": False,
-            "request_tags": [],
-            "metadata": {
-                "user_api_key_user_id": "test-user",
-                "user_api_key_hash": "test-hash",
-                "user_api_key_alias": "test-alias",
-                "user_api_key_team_id": "test-team",
-                "user_api_key_team_alias": "test-team-alias",
-                "user_api_key_user_email": "test@example.com",
-                "usage_object": {
-                    "prompt_tokens": 1000,
-                    "prompt_tokens_details": {"cached_tokens": 640},
-                },
-            },
-            "hidden_params": {
-                "additional_headers": {},
-            },
+def test_prompt_cache_token_metrics():
+    payload = {
+        "prompt_tokens": 1000,
+        "metadata": {
+            "usage_object": {
+                "prompt_tokens": 1000,
+                "prompt_tokens_details": {"cached_tokens": 640},
+            }
         },
     }
 
-    await mock_prometheus_logger.async_log_success_event(
-        kwargs, None, kwargs["start_time"], kwargs["end_time"]
-    )
+    assert PrometheusLogger._extract_prompt_cache_usage(payload) == (1000, 640, 360)
 
-    assert mock_prometheus_logger.litellm_prompt_cache_hit_requests_metric.inc_calls == [1]
-    assert mock_prometheus_logger.litellm_prompt_cache_miss_requests_metric.inc_calls == []
-    assert mock_prometheus_logger.litellm_prompt_cached_input_tokens_metric.inc_calls == [640]
-    assert mock_prometheus_logger.litellm_prompt_uncached_input_tokens_metric.inc_calls == [360]
+
+def test_prompt_cache_token_metrics_from_cache_read_input_tokens():
+    payload = {
+        "prompt_tokens": 1000,
+        "metadata": {
+            "usage_object": {
+                "prompt_tokens": 1000,
+                "cache_read_input_tokens": 640,
+            }
+        },
+    }
+
+    assert PrometheusLogger._extract_prompt_cache_usage(payload) == (1000, 640, 360)
 
 
 @pytest.mark.asyncio

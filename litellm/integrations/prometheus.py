@@ -1154,7 +1154,15 @@ class PrometheusLogger(CustomLogger):
         )
 
     @staticmethod
+    def _coerce_usage_int(value: Any) -> int:
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    @classmethod
     def _extract_prompt_cache_usage(
+        cls,
         standard_logging_payload: StandardLoggingPayload,
     ) -> Tuple[int, int, int]:
         usage_object: Any = standard_logging_payload.get("usage_object")
@@ -1165,25 +1173,37 @@ class PrometheusLogger(CustomLogger):
 
         prompt_tokens = standard_logging_payload.get("prompt_tokens", 0) or 0
         if not isinstance(prompt_tokens, (int, float)) and isinstance(usage_object, dict):
-            prompt_tokens = usage_object.get("prompt_tokens", 0) or 0
-
-        try:
-            prompt_tokens = int(prompt_tokens)
-        except (TypeError, ValueError):
-            prompt_tokens = 0
+            prompt_tokens = (
+                usage_object.get("prompt_tokens")
+                or usage_object.get("input_tokens")
+                or 0
+            )
+        prompt_tokens = cls._coerce_usage_int(prompt_tokens)
 
         cached_tokens = 0
+        cache_creation_tokens = 0
         if isinstance(usage_object, dict):
             prompt_details = usage_object.get("prompt_tokens_details")
-            if isinstance(prompt_details, dict):
-                cached_tokens = prompt_details.get("cached_tokens", 0) or 0
+            prompt_details = prompt_details if isinstance(prompt_details, dict) else {}
 
-        try:
-            cached_tokens = int(cached_tokens)
-        except (TypeError, ValueError):
-            cached_tokens = 0
+            cached_tokens = prompt_details.get("cached_tokens")
+            if cached_tokens is None:
+                cached_tokens = usage_object.get("cache_read_input_tokens")
+            if cached_tokens is None:
+                cached_tokens = usage_object.get("cached_tokens")
 
-        cached_tokens = max(0, min(cached_tokens, prompt_tokens))
+            cache_creation_tokens = usage_object.get("cache_creation_input_tokens")
+            if cache_creation_tokens is None:
+                cache_creation_tokens = prompt_details.get("cache_creation_tokens")
+
+        cached_tokens = cls._coerce_usage_int(cached_tokens)
+        cache_creation_tokens = cls._coerce_usage_int(cache_creation_tokens)
+
+        if prompt_tokens == 0 and isinstance(usage_object, dict):
+            prompt_tokens = cls._coerce_usage_int(usage_object.get("input_tokens"))
+            prompt_tokens += cached_tokens + cache_creation_tokens
+
+        cached_tokens = min(cached_tokens, prompt_tokens)
         uncached_tokens = max(0, prompt_tokens - cached_tokens)
         return prompt_tokens, cached_tokens, uncached_tokens
 
