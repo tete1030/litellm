@@ -22,6 +22,32 @@ def test_get_llm_provider():
     assert response == "bedrock"
 
 
+@patch("litellm.llms.chatgpt.chat.transformation.get_chatgpt_authenticator")
+def test_get_llm_provider_chatgpt_uses_profile_specific_authenticator(
+    mock_get_chatgpt_authenticator,
+):
+    auth = mock_get_chatgpt_authenticator.return_value
+    auth.get_api_base.return_value = "https://chatgpt.example.com"
+
+    model, provider, dynamic_api_key, api_base = litellm.get_llm_provider(
+        model="chatgpt/gpt-5.4",
+        litellm_params=LiteLLM_Params(
+            model="chatgpt/gpt-5.4",
+            chatgpt_auth_profile="account-a",
+        ),
+    )
+
+    assert model == "gpt-5.4"
+    assert provider == "chatgpt"
+    assert dynamic_api_key == "chatgpt-oauth"
+    assert api_base == "https://chatgpt.example.com"
+    mock_get_chatgpt_authenticator.assert_called_once()
+    assert (
+        mock_get_chatgpt_authenticator.call_args.args[0].chatgpt_auth_profile
+        == "account-a"
+    )
+
+
 # test_get_llm_provider()
 
 

@@ -177,6 +177,7 @@ def get_llm_provider(  # noqa: PLR0915
                 api_base=api_base,
                 api_key=api_key,
                 dynamic_api_key=dynamic_api_key,
+                litellm_params=litellm_params,
             )
 
         # check if llm provider part of model name
@@ -192,6 +193,7 @@ def get_llm_provider(  # noqa: PLR0915
                 api_base=api_base,
                 api_key=api_key,
                 dynamic_api_key=dynamic_api_key,
+                litellm_params=litellm_params,
             )
         elif model.split("/", 1)[0] in litellm.provider_list:
             custom_llm_provider = model.split("/", 1)[0]
@@ -505,6 +507,7 @@ def _get_openai_compatible_provider_info(  # noqa: PLR0915
     api_base: Optional[str],
     api_key: Optional[str],
     dynamic_api_key: Optional[str],
+    litellm_params: Optional[LiteLLM_Params] = None,
 ) -> Tuple[str, str, Optional[str], Optional[str]]:
     """
     Returns:
@@ -793,7 +796,11 @@ def _get_openai_compatible_provider_info(  # noqa: PLR0915
             dynamic_api_key,
             custom_llm_provider,
         ) = litellm.ChatGPTConfig()._get_openai_compatible_provider_info(
-            model, api_base, api_key, custom_llm_provider
+            model,
+            api_base,
+            api_key,
+            custom_llm_provider,
+            litellm_params=litellm_params,
         )
     elif custom_llm_provider == "novita":
         api_base = (

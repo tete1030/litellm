@@ -69,20 +69,25 @@ class TestChatGPTTransformation:
         assert "chatgpt-account-id" not in headers
 
     @patch("litellm.llms.chatgpt.chat.transformation.get_chatgpt_authenticator")
-    def test_provider_info_uses_placeholder_api_key(self, mock_get_chatgpt_authenticator):
+    def test_provider_info_uses_profile_specific_authenticator(
+        self, mock_get_chatgpt_authenticator
+    ):
         mock_authenticator = MagicMock()
         mock_authenticator.get_api_base.return_value = "https://chatgpt.example.com"
         mock_get_chatgpt_authenticator.return_value = mock_authenticator
 
         config = ChatGPTConfig()
+        litellm_params = {"chatgpt_auth_profile": "account-a"}
 
         api_base, api_key, provider = config._get_openai_compatible_provider_info(
             model="chatgpt/gpt-5.4",
             api_base=None,
             api_key=None,
             custom_llm_provider="chatgpt",
+            litellm_params=litellm_params,
         )
 
         assert api_base == "https://chatgpt.example.com"
         assert api_key == "chatgpt-oauth"
         assert provider == "chatgpt"
+        mock_get_chatgpt_authenticator.assert_called_with(litellm_params)

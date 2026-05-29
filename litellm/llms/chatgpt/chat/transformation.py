@@ -29,8 +29,11 @@ class ChatGPTConfig(OpenAIConfig):
         api_base: Optional[str],
         api_key: Optional[str],
         custom_llm_provider: str,
+        litellm_params: Optional[Any] = None,
     ) -> Tuple[Optional[str], Optional[str], str]:
-        dynamic_api_base = get_chatgpt_authenticator().get_api_base()
+        # Provider resolution must respect the deployment-level auth profile,
+        # otherwise router startup falls back to the implicit default profile.
+        dynamic_api_base = get_chatgpt_authenticator(litellm_params).get_api_base()
         dynamic_api_key = api_key or "chatgpt-oauth"
         return dynamic_api_base, dynamic_api_key, custom_llm_provider
 
