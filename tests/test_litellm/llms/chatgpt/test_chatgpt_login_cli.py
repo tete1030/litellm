@@ -392,7 +392,7 @@ def test_chatgpt_usage_metrics_exporter_updates_prometheus_gauges() -> None:
     )
 
 
-def test_chatgpt_profile_add_updates_yaml_config(tmp_path: Path) -> None:
+def test_chatgpt_profile_add_defaults_token_dir_next_to_config_file(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text("chatgpt_auth_profiles:\n  buy1:\n    token_dir: /tmp/buy1\n")
 
@@ -403,9 +403,23 @@ def test_chatgpt_profile_add_updates_yaml_config(tmp_path: Path) -> None:
     assert "updated profile: buy8" in result.output
     data = config_path.read_text()
     assert "buy8:" in data
-    assert str((Path.home() / ".config/litellm/chatgpt/buy8").resolve()) in data
+    assert str((tmp_path / "chatgpt" / "buy8").resolve()) in data
 
 
+def test_chatgpt_profile_add_uses_config_file_path_env_for_default_token_dir(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("chatgpt_auth_profiles: {}\n")
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["profile", "add", "buy8"],
+        env={"CONFIG_FILE_PATH": str(config_path)},
+    )
+
+    assert result.exit_code == 0
+    payload = config_path.read_text()
+    assert str((tmp_path / "chatgpt" / "buy8").resolve()) in payload
 def test_chatgpt_profile_add_preserves_yaml_comments(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(

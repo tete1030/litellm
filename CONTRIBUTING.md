@@ -243,7 +243,7 @@ If you want to build the Docker image yourself:
 
 ```bash
 # Build using the non-root Dockerfile
-docker build -f docker/Dockerfile.non_root -t litellm_dev .
+docker build -t litellm_dev .
 
 # Run with your config
 docker run \

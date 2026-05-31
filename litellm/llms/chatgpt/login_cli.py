@@ -158,7 +158,11 @@ def _save_config_file(config_path: Path, data: Dict[str, Any], format_name: str)
         ) from exc
 
 
-def _default_token_dir_for_profile(profile: str) -> str:
+def _default_token_dir_for_profile(
+    profile: str, *, config_path: Optional[Path] = None
+) -> str:
+    if config_path is not None:
+        return str((config_path.resolve().parent / "chatgpt" / profile).resolve())
     return str((Path.home() / ".config/litellm/chatgpt" / profile).resolve())
 
 
@@ -380,7 +384,7 @@ def profile_group() -> None:
 )
 @click.option(
     "--token-dir",
-    help="Token directory for this profile. Defaults to ~/.config/litellm/chatgpt/<profile>.",
+    help="Token directory for this profile. Defaults to <config dir>/chatgpt/<profile> when a config file is resolved, otherwise ~/.config/litellm/chatgpt/<profile>.",
 )
 @click.option(
     "--auth-file",
@@ -430,7 +434,9 @@ def profile_add(
 
     def _updater(profiles: Dict[str, Any], data: Dict[str, Any]) -> None:
         profile_entry: Dict[str, Any] = {}
-        resolved_token_dir = token_dir or _default_token_dir_for_profile(profile)
+        resolved_token_dir = token_dir or _default_token_dir_for_profile(
+            profile, config_path=resolved_config
+        )
         profile_entry["token_dir"] = str(Path(resolved_token_dir).expanduser().resolve())
         if auth_file:
             auth_path = Path(auth_file).expanduser()

@@ -9,7 +9,7 @@ This guide provides instructions for building and running the LiteLLM applicatio
 
 ## Building and Running the Application
 
-To build and run the application, you will use the `docker-compose.yml` file located in the root of the project. This file is configured to use the `Dockerfile.non_root` for a secure, non-root container environment.
+To build and run the application, you will use the `docker-compose.yml` file located in the root of the project. This file is configured to use the `Dockerfile` for a secure, non-root container environment.
 
 ### 1. Set the Master Key
 
@@ -33,7 +33,7 @@ docker compose up -d --build
 
 This command will:
 
--   Build the Docker image using `Dockerfile.non_root`.
+-   Build the Docker image using `Dockerfile`.
 -   Start the `litellm`, `litellm_db`, and `prometheus` services in detached mode (`-d`).
 -   The `--build` flag ensures that the image is rebuilt if there are any changes to the Dockerfile or the application code.
 
@@ -69,7 +69,7 @@ docker compose -f docker-compose.yml -f docker-compose.hardened.yml up -d
 ```
 
 This setup:
-- Builds from `docker/Dockerfile.non_root` with Prisma engines and Node toolchain baked into the image.
+- Builds from the repository `Dockerfile` with Prisma engines and Node toolchain baked into the image.
 - Runs the proxy as a non-root user with a read-only rootfs and only writable tmpfs mounts:
   - `/app/cache` (Prisma/NPM cache; backing `PRISMA_BINARY_CACHE_DIR`, `NPM_CONFIG_CACHE`, `XDG_CACHE_HOME`)
   - `/app/migrations` (Prisma migration workspace; backing `LITELLM_MIGRATION_DIR`)

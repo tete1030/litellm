@@ -1,104 +1,172 @@
-# Base image for building
+# Base images
 ARG LITELLM_BUILD_IMAGE=cgr.dev/chainguard/wolfi-base
-
-# Runtime image
 ARG LITELLM_RUNTIME_IMAGE=cgr.dev/chainguard/wolfi-base
+ARG PROXY_EXTRAS_SOURCE=published
 
-# Builder stage
+# -----------------
+# Builder Stage
+# -----------------
 FROM $LITELLM_BUILD_IMAGE AS builder
-
-# Set the working directory to /app
+ARG PROXY_EXTRAS_SOURCE
 WORKDIR /app
-
 USER root
 
-# Install build dependencies
-RUN apk add --no-cache bash gcc py3-pip python3 python3-dev openssl openssl-dev
+# Install build dependencies with retry logic (includes node for UI build)
+RUN for i in 1 2 3; do \
+    apk add --no-cache \
+    python3 \
+    python3-dev \
+    py3-pip \
+    clang \
+    llvm \
+    lld \
+    gcc \
+    linux-headers \
+    build-base \
+    bash \
+    nodejs \
+    npm && break || sleep 5; \
+    done \
+  && pip install --no-cache-dir --upgrade pip build
 
-RUN python -m pip install build
+# Cache Python dependencies
+COPY requirements.txt .
+RUN pip wheel --no-cache-dir --wheel-dir=/wheels/ -r requirements.txt \
+  && pip wheel --no-cache-dir --wheel-dir=/wheels/ "semantic_router==0.1.11" "aurelio-sdk==0.0.19" "PyJWT==2.12.0"
 
-# Copy the current directory contents into the container at /app
+# Copy source after dependency layers
 COPY . .
 
-# Build Admin UI
-# Convert Windows line endings to Unix and make executable
-RUN sed -i 's/\r$//' docker/build_admin_ui.sh && chmod +x docker/build_admin_ui.sh && ./docker/build_admin_ui.sh
+# Set non-root flag for build time consistency
+ENV LITELLM_NON_ROOT=true
 
-# Build the package
-RUN rm -rf dist/* && python -m build
+# Build Admin UI using the upstream command order while keeping a single RUN layer
+RUN mkdir -p /var/lib/litellm/ui && \
+    npm install -g npm@latest && npm cache clean --force && \
+    cd /app/ui/litellm-dashboard && \
+    if [ -f "/app/enterprise/enterprise_ui/enterprise_colors.json" ]; then \
+      cp /app/enterprise/enterprise_ui/enterprise_colors.json ./ui_colors.json; \
+    fi && \
+    npm install --legacy-peer-deps && \
+    npm run build && \
+    cp -r /app/ui/litellm-dashboard/out/* /var/lib/litellm/ui/ && \
+    mkdir -p /var/lib/litellm/assets && \
+    cp /app/litellm/proxy/logo.jpg /var/lib/litellm/assets/logo.jpg && \
+    ( cd /var/lib/litellm/ui && \
+      for html_file in *.html; do \
+        if [ "$html_file" != "index.html" ] && [ -f "$html_file" ]; then \
+          folder_name="${html_file%.html}" && \
+          mkdir -p "$folder_name" && \
+          mv "$html_file" "$folder_name/index.html"; \
+        fi; \
+      done && \
+      touch .litellm_ui_ready ) && \
+    cd /app/ui/litellm-dashboard && rm -rf ./out
 
-# There should be only one wheel file now, assume the build only creates one
-RUN ls -1 dist/*.whl | head -1
+# Build litellm wheel and place it in wheels dir (replace any PyPI wheels)
+RUN rm -rf dist/* && python -m build && \
+  rm -f /wheels/litellm-*.whl && \
+  cp dist/*.whl /wheels/
 
-# Install the package
-RUN pip install dist/*.whl
+# Optionally build local litellm-proxy-extras wheel
+RUN if [ "$PROXY_EXTRAS_SOURCE" = "local" ]; then \
+      cd /app/litellm-proxy-extras && rm -rf dist && python -m build && \
+      cp dist/*.whl /wheels/; \
+    fi
 
-# install dependencies as wheels
-RUN pip wheel --no-cache-dir --wheel-dir=/wheels/ -r requirements.txt
+# Pre-cache Prisma binaries in the builder stage
+ENV PRISMA_BINARY_CACHE_DIR=/app/.cache/prisma-python/binaries \
+    PRISMA_CLI_BINARY_TARGETS="debian-openssl-3.0.x" \
+    XDG_CACHE_HOME=/app/.cache \
+    PATH="/usr/lib/python3.13/site-packages/nodejs/bin:${PATH}"
 
-# ensure pyjwt is used, not jwt
-RUN pip uninstall jwt -y
-RUN pip uninstall PyJWT -y
-RUN pip install PyJWT==2.12.0 --no-cache-dir
+RUN pip install --no-cache-dir prisma==0.11.0 nodejs-wheel-binaries==24.13.1 \
+    && mkdir -p /app/.cache/npm
 
-# Runtime stage
+RUN NPM_CONFIG_CACHE=/app/.cache/npm \
+    python -c "import prisma.cli.prisma as p; p.ensure_cached()"
+
+RUN prisma generate && \
+    prisma --version && \
+    prisma migrate diff --from-empty --to-schema-datamodel ./schema.prisma --script > /dev/null 2>&1 || true
+
+# -----------------
+# Runtime Stage
+# -----------------
 FROM $LITELLM_RUNTIME_IMAGE AS runtime
-
-# Ensure runtime stage runs as root
+ARG PROXY_EXTRAS_SOURCE
+WORKDIR /app
 USER root
 
-# Install runtime dependencies (libsndfile needed for audio processing on ARM64)
-RUN apk add --no-cache bash openssl tzdata nodejs npm python3 py3-pip libsndfile && \
-    npm install -g npm@latest tar@7.5.11 glob@11.1.0 @isaacs/brace-expansion@5.0.1 minimatch@10.2.4 diff@8.0.3 && \
-    # SECURITY FIX: npm bundles tar, glob, and brace-expansion at multiple nested
-    # levels inside its dependency tree. `npm install -g <pkg>` only creates a
-    # SEPARATE global package, it does NOT replace npm's internal copies.
-    # We must find and replace EVERY copy inside npm's directory.
-    GLOBAL="$(npm root -g)" && \
-    find "$GLOBAL/npm" -type d -name "tar" -path "*/node_modules/tar" | while read d; do \
+# Install runtime dependencies with retry
+RUN for i in 1 2 3; do \
+    apk upgrade --no-cache && break || sleep 5; \
+    done \
+  && for i in 1 2 3; do \
+    apk add --no-cache python3 py3-pip bash openssl tzdata nodejs npm supervisor && break || sleep 5; \
+    done \
+  && apk upgrade --no-cache nodejs \
+  && npm install -g npm@latest tar@7.5.11 glob@11.1.0 @isaacs/brace-expansion@5.0.1 minimatch@10.2.4 diff@8.0.3 \
+  && GLOBAL="$(npm root -g)" \
+  && find "$GLOBAL/npm" -type d -name "tar" -path "*/node_modules/tar" | while read d; do \
         rm -rf "$d" && cp -rL "$GLOBAL/tar" "$d"; \
-    done && \
-    find "$GLOBAL/npm" -type d -name "glob" -path "*/node_modules/glob" | while read d; do \
+     done \
+  && find "$GLOBAL/npm" -type d -name "glob" -path "*/node_modules/glob" | while read d; do \
         rm -rf "$d" && cp -rL "$GLOBAL/glob" "$d"; \
-    done && \
-    find "$GLOBAL/npm" -type d -name "brace-expansion" -path "*/node_modules/@isaacs/brace-expansion" | while read d; do \
+     done \
+  && find "$GLOBAL/npm" -type d -name "brace-expansion" -path "*/node_modules/@isaacs/brace-expansion" | while read d; do \
         rm -rf "$d" && cp -rL "$GLOBAL/@isaacs/brace-expansion" "$d"; \
-    done && \
-    find "$GLOBAL/npm" -type d -name "minimatch" -path "*/node_modules/minimatch" | while read d; do \
+     done \
+  && find "$GLOBAL/npm" -type d -name "minimatch" -path "*/node_modules/minimatch" | while read d; do \
         rm -rf "$d" && cp -rL "$GLOBAL/minimatch" "$d"; \
-    done && \
-    find "$GLOBAL/npm" -type d -name "diff" -path "*/node_modules/diff" | while read d; do \
+     done \
+  && find "$GLOBAL/npm" -type d -name "diff" -path "*/node_modules/diff" | while read d; do \
         rm -rf "$d" && cp -rL "$GLOBAL/diff" "$d"; \
-    done && \
-    # SECURITY FIX: patch npm's own package.json metadata so scanners see the
-    # actual installed versions instead of the stale declared dependencies.
-    find /usr/local/lib /usr/lib -path "*/node_modules/npm/package.json" -exec \
-        sed -i 's/"tar": "\^7\.5\.[0-9]*"/"tar": "^7.5.10"/g; s/"minimatch": "\^10\.[0-9.]*"/"minimatch": "^10.2.4"/g' {} + 2>/dev/null && \
-    npm cache clean --force && \
-    # Remove the apk-tracked npm so its stale SBOM metadata (tar 7.5.9) is
-    # no longer visible to image scanners.  The globally installed npm@latest
-    # at /usr/local/lib/node_modules/npm/ remains fully functional.
-    { apk del --no-cache npm 2>/dev/null || true; }
+     done \
+  && find /usr/local/lib /usr/lib -path "*/node_modules/npm/package.json" -exec \
+        sed -i 's/"tar": "\^7\.5\.[0-9]*"/"tar": "^7.5.10"/g; s/"minimatch": "\^10\.[0-9.]*"/"minimatch": "^10.2.4"/g' {} + 2>/dev/null \
+  && npm cache clean --force \
+  && { apk del --no-cache npm 2>/dev/null || true; }
 
-WORKDIR /app
-# Copy the current directory contents into the container at /app
-COPY . .
-RUN ls -la /app
-
-# Copy the built wheel from the builder stage to the runtime stage; assumes only one wheel file is present
-COPY --from=builder /app/dist/*.whl .
+# Copy artifacts from builder
+COPY --from=builder /app/requirements.txt /app/requirements.txt
+COPY --from=builder /app/docker/entrypoint.sh /app/docker/prod_entrypoint.sh /app/docker/
+COPY --from=builder /app/docker/supervisord.conf /etc/supervisord.conf
+COPY --from=builder /app/schema.prisma /app/
+# Copy prisma_migration.py for Helm migrations job compatibility
+COPY --from=builder /app/litellm/proxy/prisma_migration.py /app/litellm/proxy/prisma_migration.py
 COPY --from=builder /wheels/ /wheels/
+COPY --from=builder /var/lib/litellm/ui /var/lib/litellm/ui
+COPY --from=builder /var/lib/litellm/assets /var/lib/litellm/assets
+COPY --from=builder /app/.cache /app/.cache
+COPY --from=builder /app/litellm-proxy-extras /app/litellm-proxy-extras
+COPY --from=builder \
+  /usr/lib/python3.13/site-packages/nodejs* \
+  /usr/lib/python3.13/site-packages/prisma* \
+  /usr/lib/python3.13/site-packages/tomlkit* \
+  /usr/lib/python3.13/site-packages/nodeenv* \
+  /usr/lib/python3.13/site-packages/
+COPY --from=builder /usr/bin/prisma /usr/bin/prisma
 
-# Install the built wheel using pip; again using a wildcard if it's the only file
-RUN pip install *.whl /wheels/* --no-index --find-links=/wheels/ && rm -f *.whl && rm -rf /wheels
+# Final runtime environment configuration
+ENV PRISMA_BINARY_CACHE_DIR=/app/.cache/prisma-python/binaries \
+    PRISMA_CLI_BINARY_TARGETS="debian-openssl-3.0.x" \
+    HOME=/app \
+    LITELLM_NON_ROOT=true \
+    XDG_CACHE_HOME=/app/.cache
 
-# Replace the nodejs-wheel-binaries bundled node with the system node (fixes CVE-2025-55130)
-RUN NODEJS_WHEEL_NODE=$(find /usr/lib -path "*/nodejs_wheel/bin/node" 2>/dev/null) && \
-    if [ -n "$NODEJS_WHEEL_NODE" ]; then cp /usr/bin/node "$NODEJS_WHEEL_NODE"; fi
-
-# Remove test files and keys from dependencies
-RUN find /usr/lib -type f -path "*/tornado/test/*" -delete && \
-    find /usr/lib -type d -path "*/tornado/test" -delete
+# Install packages from wheels and optional extras without network
+RUN pip install --no-index --find-links=/wheels/ -r requirements.txt && \
+    pip install --no-index --find-links=/wheels/ /wheels/litellm-*-py3-none-any.whl && \
+    pip install --no-index --find-links=/wheels/ --no-deps semantic_router==0.1.11 && \
+    pip install --no-index --find-links=/wheels/ aurelio-sdk==0.0.19 && \
+    if [ "$PROXY_EXTRAS_SOURCE" = "local" ]; then \
+      if ls /wheels/litellm_proxy_extras-*.whl >/dev/null 2>&1; then \
+        pip install --no-index --find-links=/wheels/ /wheels/litellm_proxy_extras-*.whl; \
+      else \
+        echo "litellm_proxy_extras wheel not found; skipping local install"; \
+      fi; \
+    fi
 
 # SECURITY FIX: nodejs-wheel-binaries (pip package used by Prisma) bundles a complete
 # npm with old vulnerable deps at /usr/lib/python3.*/site-packages/nodejs_wheel/.
@@ -121,22 +189,46 @@ RUN GLOBAL="$(npm root -g)" && \
         rm -rf "$d" && cp -rL "$GLOBAL/diff" "$d"; \
     done
 
-# Install semantic_router and aurelio-sdk using script
-# Convert Windows line endings to Unix and make executable
-RUN sed -i 's/\r$//' docker/install_auto_router.sh && chmod +x docker/install_auto_router.sh && ./docker/install_auto_router.sh
-
-# Generate prisma client using the correct schema
-RUN prisma generate --schema=./litellm/proxy/schema.prisma
+# Permissions, cleanup, and Prisma prep
 # Convert Windows line endings to Unix for entrypoint scripts
-RUN sed -i 's/\r$//' docker/entrypoint.sh && chmod +x docker/entrypoint.sh
-RUN sed -i 's/\r$//' docker/prod_entrypoint.sh && chmod +x docker/prod_entrypoint.sh
+RUN sed -i 's/\r$//' docker/entrypoint.sh && \
+    sed -i 's/\r$//' docker/prod_entrypoint.sh && \
+    chmod +x docker/entrypoint.sh docker/prod_entrypoint.sh && \
+    mkdir -p /nonexistent /.npm /var/lib/litellm/assets /var/lib/litellm/ui && \
+    chown -R nobody:nogroup /app /var/lib/litellm/ui /var/lib/litellm/assets /nonexistent /.npm && \
+    pip uninstall jwt -y || true && \
+    pip uninstall PyJWT -y || true && \
+    pip install --no-index --find-links=/wheels/ PyJWT==2.12.0 --no-cache-dir && \
+    rm -rf /wheels && \
+    PRISMA_PATH=$(python -c "import os, prisma; print(os.path.dirname(prisma.__file__))") && \
+    chown -R nobody:nogroup $PRISMA_PATH && \
+    LITELLM_PKG_MIGRATIONS_PATH="$(python -c 'import os, litellm_proxy_extras; print(os.path.dirname(litellm_proxy_extras.__file__))' 2>/dev/null || echo '')/migrations" && \
+    [ -n "$LITELLM_PKG_MIGRATIONS_PATH" ] && chown -R nobody:nogroup $LITELLM_PKG_MIGRATIONS_PATH && \
+    LITELLM_PROXY_EXTRAS_PATH=$(python -c "import os, litellm_proxy_extras; print(os.path.dirname(litellm_proxy_extras.__file__))" 2>/dev/null || echo "") && \
+    chgrp -R 0 $PRISMA_PATH /var/lib/litellm/ui /var/lib/litellm/assets && \
+    [ -n "$LITELLM_PROXY_EXTRAS_PATH" ] && chgrp -R 0 $LITELLM_PROXY_EXTRAS_PATH || true && \
+    chmod -R g=u $PRISMA_PATH /var/lib/litellm/ui /var/lib/litellm/assets && \
+    [ -n "$LITELLM_PROXY_EXTRAS_PATH" ] && chmod -R g=u $LITELLM_PROXY_EXTRAS_PATH || true && \
+    chmod -R g+w $PRISMA_PATH /var/lib/litellm/ui /var/lib/litellm/assets && \
+    [ -n "$LITELLM_PROXY_EXTRAS_PATH" ] && chmod -R g+w $LITELLM_PROXY_EXTRAS_PATH || true && \
+    chmod -R g+rX $PRISMA_PATH && \
+    chmod -R g+rX /app/.cache && \
+    mkdir -p /tmp/.npm /nonexistent /.npm
+
+# Switch to non-root user for runtime
+USER nobody
+
+# Generate Prisma client as nobody user to ensure correct file ownership
+RUN prisma generate
+
+# Prisma runtime knobs for offline containers
+ENV PRISMA_SKIP_POSTINSTALL_GENERATE=1 \
+    PRISMA_HIDE_UPDATE_MESSAGE=1 \
+    PRISMA_ENGINES_CHECKSUM_IGNORE_MISSING=1 \
+    NPM_CONFIG_CACHE=/app/.cache/npm \
+    NPM_CONFIG_PREFER_OFFLINE=true \
+    PRISMA_OFFLINE_MODE=true
 
 EXPOSE 4000/tcp
-
-RUN apk add --no-cache supervisor
-COPY docker/supervisord.conf /etc/supervisord.conf
-
-ENTRYPOINT ["docker/prod_entrypoint.sh"]
-
-# Append "--detailed_debug" to the end of CMD to view detailed debug logs
+ENTRYPOINT ["/app/docker/prod_entrypoint.sh"]
 CMD ["--port", "4000"]

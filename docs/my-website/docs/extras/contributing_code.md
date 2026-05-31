@@ -149,10 +149,10 @@ git clone https://github.com/BerriAI/litellm.git
 
 Step 2: Build the Docker image
 
-Build using `Dockerfile.non_root`:
+Build using `Dockerfile`:
 
 ```shell
-docker build -f docker/Dockerfile.non_root -t litellm_test_image .
+docker build -t litellm_test_image .
 ```
 
 Step 3: Run the Docker image

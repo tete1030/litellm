@@ -15,6 +15,7 @@ fastapi==0.120.1 # server dep
 starlette==0.49.1 # starlette fastapi dep
 backoff==2.2.1 # server dep
 pyyaml==6.0.2 # server dep
+ruamel-yaml==0.18.16 # YAML round-trip editing for litellm-chatgpt profile commands
 uvicorn==0.31.1 # server dep
 gunicorn==23.0.0 # server dep
 fastuuid==0.13.5 # for uuid4
