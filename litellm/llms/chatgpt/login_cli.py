@@ -24,15 +24,15 @@ _fetch_usage_for_profile = usage_service.fetch_usage_for_profile
 _get_usage_url = usage_service.get_usage_url
 _normalize_usage_payload = usage_service.normalize_usage_payload
 
-DEFAULT_CONFIG_ENV_VAR = "CONFIG_FILE_PATH"
+DEFAULT_CONFIG_ENV_VAR = "CHATGPT_INVENTORY_PATH"
 DEFAULT_CONFIG_DIR = Path.home() / ".config/litellm"
-DEFAULT_CONFIG = DEFAULT_CONFIG_DIR / "config.yaml"
+DEFAULT_CONFIG = DEFAULT_CONFIG_DIR / "inventory.yaml"
 DEFAULT_CONFIG_CANDIDATES = (
     DEFAULT_CONFIG,
-    DEFAULT_CONFIG_DIR / "config.yml",
+    DEFAULT_CONFIG_DIR / "inventory.yml",
 )
 DEFAULT_CONFIG_HELP = (
-    "$CONFIG_FILE_PATH, ~/.config/litellm/config.yaml, ~/.config/litellm/config.yml"
+    "$CHATGPT_INVENTORY_PATH, ~/.config/litellm/inventory.yaml, ~/.config/litellm/inventory.yml"
 )
 DEFAULT_METRICS_PORT = 9464
 DEFAULT_METRICS_INTERVAL_SECONDS = 300
@@ -59,13 +59,13 @@ def _resolve_config_path(
         )
 
     if require_exists and not resolved.exists():
-        raise click.ClickException(f"Config not found: {resolved}")
+        raise click.ClickException(f"Inventory not found: {resolved}")
     return resolved
 
 
 def _load_config_file(config_path: Path) -> Dict[str, Any]:
     if not config_path.exists():
-        raise click.ClickException(f"Config not found: {config_path}")
+        raise click.ClickException(f"Inventory not found: {config_path}")
 
     suffix = config_path.suffix.lower()
     try:
@@ -76,7 +76,7 @@ def _load_config_file(config_path: Path) -> Dict[str, Any]:
             import yaml
         except ModuleNotFoundError as exc:
             raise click.ClickException(
-                "YAML config support requires PyYAML. Install with `pip install 'litellm[proxy]'` "
+                "YAML inventory support requires PyYAML. Install with `pip install 'litellm[proxy]'` "
                 "or pass a JSON config file."
             ) from exc
 
@@ -85,7 +85,7 @@ def _load_config_file(config_path: Path) -> Dict[str, Any]:
         raise
     except Exception as exc:
         raise click.ClickException(
-            f"Failed reading config file {config_path}: {exc}"
+            f"Failed reading inventory file {config_path}: {exc}"
         ) from exc
 
 
@@ -106,16 +106,16 @@ def _load_yaml_config_round_trip(config_path: Path) -> Dict[str, Any]:
             return yaml.load(handle) or {}
     except Exception as exc:
         raise click.ClickException(
-            f"Failed reading config file {config_path}: {exc}"
+            f"Failed reading inventory file {config_path}: {exc}"
         ) from exc
 
 
 def _load_chatgpt_auth_profiles(config_path: Path) -> Dict[str, Any]:
     data = _load_config_file(config_path)
-    profiles = data.get("chatgpt_auth_profiles") or {}
+    profiles = data.get("profiles") or {}
     if not isinstance(profiles, dict):
         raise click.ClickException(
-            "chatgpt_auth_profiles must be a mapping in the config file"
+            "profiles must be a mapping in the inventory file"
         )
     return profiles
 
@@ -123,6 +123,8 @@ def _load_chatgpt_auth_profiles(config_path: Path) -> Dict[str, Any]:
 def _load_config_with_format(config_path: Path) -> Tuple[Dict[str, Any], str]:
     suffix = config_path.suffix.lower()
     format_name = "json" if suffix == ".json" else "yaml"
+    if not config_path.exists():
+        return {}, format_name
     if format_name == "json":
         data = _load_config_file(config_path)
     else:
@@ -141,8 +143,8 @@ def _save_config_file(config_path: Path, data: Dict[str, Any], format_name: str)
             from ruamel.yaml import YAML
         except ModuleNotFoundError as exc:
             raise click.ClickException(
-                "Editing YAML config files requires ruamel.yaml to preserve comments. "
-                "Install with `pip install 'litellm[proxy]'` or use a JSON config file."
+                "Editing YAML inventory files requires ruamel.yaml to preserve comments. "
+                "Install with `pip install 'litellm[proxy]'` or use a JSON inventory file."
             ) from exc
 
         yaml = YAML()
@@ -154,7 +156,7 @@ def _save_config_file(config_path: Path, data: Dict[str, Any], format_name: str)
         raise
     except Exception as exc:
         raise click.ClickException(
-            f"Failed writing config file {config_path}: {exc}"
+            f"Failed writing inventory file {config_path}: {exc}"
         ) from exc
 
 
@@ -166,44 +168,35 @@ def _default_token_dir_for_profile(
     return str((Path.home() / ".config/litellm/chatgpt" / profile).resolve())
 
 
-def _ensure_model_list(data: Dict[str, Any]) -> List[Dict[str, Any]]:
-    model_list = data.get("model_list")
-    if model_list is None:
-        model_list = []
-        data["model_list"] = model_list
-    if not isinstance(model_list, list):
-        raise click.ClickException("model_list must be a list in the config file")
-    return model_list
+def _is_profile_enabled(profile_entry: Any) -> bool:
+    if not isinstance(profile_entry, dict):
+        return True
+    return bool(profile_entry.get("enabled", True))
 
 
-def _deployment_matches_profile(deployment: Any, profile: str) -> bool:
-    if not isinstance(deployment, dict):
-        return False
-    litellm_params = deployment.get("litellm_params")
-    if not isinstance(litellm_params, dict):
-        return False
-    return litellm_params.get("chatgpt_auth_profile") == profile
+def _normalize_runtime_profiles(profiles: Dict[str, Any], *, enabled_only: bool) -> Dict[str, Any]:
+    runtime_profiles: Dict[str, Any] = {}
+    for name, entry in profiles.items():
+        if enabled_only and not _is_profile_enabled(entry):
+            continue
+        normalized = entry if isinstance(entry, dict) else {}
+        runtime_profiles[name] = {
+            key: value
+            for key, value in normalized.items()
+            if key in {"token_dir", "auth_file"}
+        }
+    return runtime_profiles
 
 
-def _get_profile_deployments(data: Dict[str, Any], profile: str) -> List[Dict[str, Any]]:
-    model_list = data.get("model_list") or []
-    if not isinstance(model_list, list):
-        return []
-    return [item for item in model_list if _deployment_matches_profile(item, profile)]
-
-
-def _format_profile_deployments(deployments: List[Dict[str, Any]]) -> str:
-    if not deployments:
-        return "-"
-    rendered: List[str] = []
-    for deployment in deployments:
-        model_name = str(deployment.get("model_name") or "-")
-        model_info = deployment.get("model_info") or {}
-        deployment_id = "-"
-        if isinstance(model_info, dict):
-            deployment_id = str(model_info.get("id") or "-")
-        rendered.append(f"{deployment_id} ({model_name})")
-    return ", ".join(rendered)
+def _profile_ls_row(profile: str, profile_entry: Any) -> Dict[str, Any]:
+    entry = profile_entry if isinstance(profile_entry, dict) else {}
+    return {
+        "profile": profile,
+        "token_dir": entry.get("token_dir", "-"),
+        "auth_file": entry.get("auth_file", "auth.json (default)"),
+        "enabled": _is_profile_enabled(entry),
+        "weight": entry.get("weight", 1),
+    }
 
 
 def _update_profiles_in_config(
@@ -211,24 +204,27 @@ def _update_profiles_in_config(
     updater: Any,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     data, format_name = _load_config_with_format(config_path)
-    profiles = data.get("chatgpt_auth_profiles")
+    profiles = data.get("profiles")
     if profiles is None:
         profiles = {}
-        data["chatgpt_auth_profiles"] = profiles
+        data["profiles"] = profiles
     if not isinstance(profiles, dict):
         raise click.ClickException(
-            "chatgpt_auth_profiles must be a mapping in the config file"
+            "profiles must be a mapping in the inventory file"
         )
+    data.setdefault("models", {})
 
     updater(profiles)
     _save_config_file(config_path, data, format_name)
     return data, profiles
 
 
-def _prepare_profiles(config_path: Path) -> Dict[str, Any]:
+def _prepare_profiles(config_path: Path, *, enabled_only: bool = False) -> Dict[str, Any]:
     profiles = _load_chatgpt_auth_profiles(config_path)
-    litellm.chatgpt_auth_profiles = profiles
-    return profiles
+    litellm.chatgpt_auth_profiles = _normalize_runtime_profiles(
+        profiles, enabled_only=enabled_only
+    )
+    return litellm.chatgpt_auth_profiles
 
 
 def _load_auth_data(profile: str) -> tuple[Any, Path, Dict[str, Any]]:
@@ -357,7 +353,7 @@ def _render_usage_report(results: List[UsageResult]) -> str:
 def _refresh_usage_metrics(
     config_path: Path, usage_url: str, metrics: ChatGPTUsageMetrics
 ) -> List[UsageResult]:
-    profiles = _prepare_profiles(config_path)
+    profiles = _prepare_profiles(config_path, enabled_only=True)
     results = [_fetch_usage_for_profile(name, usage_url) for name in sorted(profiles.keys())]
     metrics.update(results)
     return results
@@ -370,71 +366,41 @@ def cli() -> None:
 
 @cli.group(name="profile")
 def profile_group() -> None:
-    """Manage chatgpt_auth_profiles entries in a LiteLLM config."""
+    """Manage ChatGPT inventory profile entries."""
 
 
 @profile_group.command(name="add")
 @click.argument("profile")
 @click.option(
-    "--config",
+    "--inventory",
     "config_path",
     default=None,
     show_default=DEFAULT_CONFIG_HELP,
-    help="LiteLLM config file containing chatgpt_auth_profiles.",
+    help="ChatGPT inventory file containing profiles.",
 )
 @click.option(
     "--token-dir",
-    help="Token directory for this profile. Defaults to <config dir>/chatgpt/<profile> when a config file is resolved, otherwise ~/.config/litellm/chatgpt/<profile>.",
+    help="Token directory for this profile. Defaults to <inventory dir>/chatgpt/<profile> when an inventory file is resolved, otherwise ~/.config/litellm/chatgpt/<profile>.",
 )
 @click.option(
     "--auth-file",
-    help="Optional auth file path or file name for this profile.",
-)
-@click.option(
-    "--with-deployment",
-    is_flag=True,
-    help="Also add or update a ChatGPT deployment in model_list for this profile.",
-)
-@click.option(
-    "--model-name",
-    default="gpt-5.4",
-    show_default=True,
-    help="Logical model_name for the deployment created by --with-deployment.",
-)
-@click.option(
-    "--provider-model",
-    default="chatgpt/gpt-5.4",
-    show_default=True,
-    help="Provider model for the deployment created by --with-deployment.",
-)
-@click.option(
-    "--mode",
-    default="responses",
-    show_default=True,
-    help="model_info.mode for the deployment created by --with-deployment.",
-)
-@click.option(
-    "--deployment-id",
-    help="Optional model_info.id for the deployment. Defaults to chatgpt-<profile>.",
+    help="Optional auth file path or file name for this profile entry.",
 )
 def profile_add(
     profile: str,
     config_path: str,
     token_dir: Optional[str],
     auth_file: Optional[str],
-    with_deployment: bool,
-    model_name: str,
-    provider_model: str,
-    mode: str,
-    deployment_id: Optional[str],
 ) -> None:
-    """Add or update a named ChatGPT auth profile in config."""
-    resolved_config = _resolve_config_path(config_path)
-    resolved_deployment_id = deployment_id or f"chatgpt-{profile}"
+    """Add or update a named ChatGPT auth profile in inventory."""
+    resolved_config = _resolve_config_path(config_path, require_exists=False)
 
-    def _updater(profiles: Dict[str, Any], data: Dict[str, Any]) -> None:
-        profile_entry: Dict[str, Any] = {}
-        resolved_token_dir = token_dir or _default_token_dir_for_profile(
+    def _updater(profiles: Dict[str, Any]) -> None:
+        existing_entry = profiles.get(profile)
+        profile_entry: Dict[str, Any] = (
+            dict(existing_entry) if isinstance(existing_entry, dict) else {}
+        )
+        resolved_token_dir = token_dir or profile_entry.get("token_dir") or _default_token_dir_for_profile(
             profile, config_path=resolved_config
         )
         profile_entry["token_dir"] = str(Path(resolved_token_dir).expanduser().resolve())
@@ -443,73 +409,28 @@ def profile_add(
             profile_entry["auth_file"] = (
                 str(auth_path.resolve()) if auth_path.is_absolute() else auth_file
             )
+        profile_entry.setdefault("enabled", True)
+        profile_entry.setdefault("weight", 1)
         profiles[profile] = profile_entry
 
-        if with_deployment:
-            model_list = _ensure_model_list(data)
-            target_deployment: Optional[Dict[str, Any]] = None
-            for deployment in model_list:
-                if _deployment_matches_profile(deployment, profile):
-                    target_deployment = deployment
-                    break
-            if target_deployment is None:
-                target_deployment = {}
-                model_list.append(target_deployment)
-
-            existing_model_info = target_deployment.get("model_info")
-            if not isinstance(existing_model_info, dict):
-                existing_model_info = {}
-            existing_litellm_params = target_deployment.get("litellm_params")
-            if not isinstance(existing_litellm_params, dict):
-                existing_litellm_params = {}
-
-            target_deployment["model_name"] = model_name
-            target_deployment["model_info"] = {
-                **existing_model_info,
-                "id": resolved_deployment_id,
-                "mode": mode,
-            }
-            target_deployment["litellm_params"] = {
-                **existing_litellm_params,
-                "model": provider_model,
-                "chatgpt_auth_profile": profile,
-            }
-
-    data, format_name = _load_config_with_format(resolved_config)
-    profile_map = data.get("chatgpt_auth_profiles")
-    if profile_map is None:
-        profile_map = {}
-        data["chatgpt_auth_profiles"] = profile_map
-    if not isinstance(profile_map, dict):
-        raise click.ClickException(
-            "chatgpt_auth_profiles must be a mapping in the config file"
-        )
-
-    _updater(profile_map, data)
-    _save_config_file(resolved_config, data, format_name)
-    profiles = profile_map
+    _, profiles = _update_profiles_in_config(resolved_config, _updater)
     added_profile = profiles[profile]
     click.echo(f"updated profile: {profile}")
-    click.echo(f"config:          {resolved_config}")
+    click.echo(f"inventory:       {resolved_config}")
     click.echo(f"token_dir:       {added_profile.get('token_dir')}")
     click.echo(f"auth_file:       {added_profile.get('auth_file', 'auth.json (default)')}")
-    if with_deployment:
-        click.echo(f"deployment_id:   {resolved_deployment_id}")
-        click.echo(f"model_name:      {model_name}")
-        click.echo(f"provider_model:  {provider_model}")
-    else:
-        click.echo(
-            "note: this only updates chatgpt_auth_profiles; add a model_list deployment if you want this profile to receive traffic."
-        )
+    click.echo(f"enabled:         {added_profile.get('enabled', True)}")
+    click.echo(f"weight:          {added_profile.get('weight', 1)}")
+    click.echo("note: rerun the inventory render script to regenerate LiteLLM config.yaml.")
 
 
 @profile_group.command(name="ls")
 @click.option(
-    "--config",
+    "--inventory",
     "config_path",
     default=None,
     show_default=DEFAULT_CONFIG_HELP,
-    help="LiteLLM config file containing chatgpt_auth_profiles.",
+    help="ChatGPT inventory file containing profiles.",
 )
 @click.option(
     "--json",
@@ -518,37 +439,16 @@ def profile_add(
     help="Emit profiles as JSON instead of a table.",
 )
 def profile_ls(config_path: str, json_output: bool) -> None:
-    """List configured ChatGPT auth profiles and linked deployments."""
+    """List configured ChatGPT auth profiles from inventory."""
     resolved_config = _resolve_config_path(config_path)
     data = _load_config_file(resolved_config)
-    profiles = data.get("chatgpt_auth_profiles") or {}
+    profiles = data.get("profiles") or {}
     if not isinstance(profiles, dict):
         raise click.ClickException(
-            "chatgpt_auth_profiles must be a mapping in the config file"
+            "profiles must be a mapping in the inventory file"
         )
 
-    rows = []
-    for profile in sorted(profiles.keys()):
-        profile_entry = profiles[profile] if isinstance(profiles[profile], dict) else {}
-        deployments = _get_profile_deployments(data, profile)
-        rows.append(
-            {
-                "profile": profile,
-                "token_dir": profile_entry.get("token_dir", "-"),
-                "auth_file": profile_entry.get("auth_file", "auth.json (default)"),
-                "deployments": [
-                    {
-                        "model_name": deployment.get("model_name"),
-                        "id": (
-                            deployment.get("model_info", {}).get("id")
-                            if isinstance(deployment.get("model_info"), dict)
-                            else None
-                        ),
-                    }
-                    for deployment in deployments
-                ],
-            }
-        )
+    rows = [_profile_ls_row(profile, profiles[profile]) for profile in sorted(profiles.keys())]
 
     if json_output:
         click.echo(json.dumps(rows, indent=2))
@@ -559,13 +459,14 @@ def profile_ls(config_path: str, json_output: bool) -> None:
             item["profile"],
             str(item["token_dir"]),
             str(item["auth_file"]),
-            _format_profile_deployments(_get_profile_deployments(data, item["profile"])),
+            str(item["enabled"]),
+            str(item["weight"]),
         ]
         for item in rows
     ]
     click.echo(
         _render_table(
-            ["profile", "token_dir", "auth_file", "deployments"],
+            ["profile", "token_dir", "auth_file", "enabled", "weight"],
             table_rows,
         )
     )
@@ -574,11 +475,11 @@ def profile_ls(config_path: str, json_output: bool) -> None:
 @profile_group.command(name="rm")
 @click.argument("profile")
 @click.option(
-    "--config",
+    "--inventory",
     "config_path",
     default=None,
     show_default=DEFAULT_CONFIG_HELP,
-    help="LiteLLM config file containing chatgpt_auth_profiles.",
+    help="ChatGPT inventory file containing profiles.",
 )
 @click.option(
     "--purge-files",
@@ -586,14 +487,15 @@ def profile_ls(config_path: str, json_output: bool) -> None:
     help="Also delete the profile auth.json and remove the profile directory if it becomes empty.",
 )
 def profile_rm(profile: str, config_path: str, purge_files: bool) -> None:
-    """Remove a named ChatGPT auth profile from config."""
+    """Remove a named ChatGPT auth profile from inventory."""
     resolved_config = _resolve_config_path(config_path)
-    profiles = _prepare_profiles(resolved_config)
-    if profile not in profiles:
+    inventory_profiles = _load_chatgpt_auth_profiles(resolved_config)
+    if profile not in inventory_profiles:
         raise click.ClickException(
-            f"Profile '{profile}' not found in chatgpt_auth_profiles"
+            f"Profile '{profile}' not found in profiles"
         )
 
+    _prepare_profiles(resolved_config)
     authenticator = get_chatgpt_authenticator({"chatgpt_auth_profile": profile})
     auth_path = Path(authenticator.auth_file)
     session_path = _get_login_session_path(auth_path)
@@ -624,7 +526,7 @@ def profile_rm(profile: str, config_path: str, purge_files: bool) -> None:
                 removed_token_dir = False
 
     click.echo(f"removed profile: {profile}")
-    click.echo(f"config:          {resolved_config}")
+    click.echo(f"inventory:       {resolved_config}")
     if removed_session:
         click.echo(f"removed session: {session_path}")
     if purge_files:
@@ -641,18 +543,18 @@ def profile_rm(profile: str, config_path: str, purge_files: bool) -> None:
             "note: auth.json is kept by default; use --purge-files to delete auth.json and attempt to remove the profile directory."
         )
     click.echo(
-        "note: model_list deployments are not removed automatically; clean those up separately if needed."
+        "note: rerun the inventory render script to remove this profile from generated model routes."
     )
 
 
 @cli.command(name="login")
 @click.argument("profile")
 @click.option(
-    "--config",
+    "--inventory",
     "config_path",
     default=None,
     show_default=DEFAULT_CONFIG_HELP,
-    help="LiteLLM config file containing chatgpt_auth_profiles.",
+    help="ChatGPT inventory file containing profiles.",
 )
 @click.option(
     "--force",
@@ -702,7 +604,7 @@ def login(
     session_path = _get_login_session_path(auth_path)
 
     click.echo(f"profile: {profile}")
-    click.echo(f"config:  {resolved_config}")
+    click.echo(f"inventory: {resolved_config}")
     click.echo(f"auth:    {auth_path}")
 
     if force and auth_path.exists():
@@ -762,11 +664,11 @@ def login(
 @cli.command(name="usage")
 @click.argument("profile", required=False)
 @click.option(
-    "--config",
+    "--inventory",
     "config_path",
     default=None,
     show_default=DEFAULT_CONFIG_HELP,
-    help="LiteLLM config file containing chatgpt_auth_profiles.",
+    help="ChatGPT inventory file containing profiles.",
 )
 @click.option(
     "--json",
@@ -777,8 +679,14 @@ def login(
 def usage(profile: Optional[str], config_path: str, json_output: bool) -> None:
     """Query usage for one or all configured ChatGPT profiles."""
     resolved_config = _resolve_config_path(config_path)
-    profiles = _prepare_profiles(resolved_config)
-    profile_names = [profile] if profile else sorted(profiles.keys())
+    if profile:
+        profiles = _prepare_profiles(resolved_config)
+        if profile not in profiles:
+            raise click.ClickException(f"Profile {profile!r} not found in inventory")
+        profile_names = [profile]
+    else:
+        profiles = _prepare_profiles(resolved_config, enabled_only=True)
+        profile_names = sorted(profiles.keys())
     usage_url = _get_usage_url()
 
     results = [_fetch_usage_for_profile(name, usage_url) for name in profile_names]
@@ -791,11 +699,11 @@ def usage(profile: Optional[str], config_path: str, json_output: bool) -> None:
 
 @cli.command(name="metrics")
 @click.option(
-    "--config",
+    "--inventory",
     "config_path",
     default=None,
     show_default=DEFAULT_CONFIG_HELP,
-    help="LiteLLM config file containing chatgpt_auth_profiles.",
+    help="ChatGPT inventory file containing profiles.",
 )
 @click.option(
     "--listen-host",

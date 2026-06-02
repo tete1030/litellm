@@ -21,7 +21,7 @@ from litellm.llms.chatgpt.login_cli import (
 def test_chatgpt_login_cli_reads_yaml_config_and_logs_in(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "chatgpt_auth_profiles:\n  buy2:\n    token_dir: /tmp/buy2\n"
+        "profiles:\n  buy2:\n    token_dir: /tmp/buy2\n"
     )
 
     mock_authenticator = MagicMock()
@@ -47,7 +47,7 @@ def test_chatgpt_login_cli_reads_yaml_config_and_logs_in(tmp_path: Path) -> None
             [
                 "login",
                 "buy2",
-                "--config",
+                "--inventory",
                 str(config_path),
             ],
         )
@@ -65,7 +65,7 @@ def test_chatgpt_login_cli_reads_yaml_config_and_logs_in(tmp_path: Path) -> None
             [
                 "login",
                 "buy2",
-                "--config",
+                "--inventory",
                 str(config_path),
                 "--callback-url",
                 "http://localhost:1455/auth/callback?code=abc&state=xyz",
@@ -98,7 +98,7 @@ def test_chatgpt_login_cli_reads_yaml_config_and_logs_in(tmp_path: Path) -> None
 def test_chatgpt_login_cli_force_backs_up_existing_auth(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "chatgpt_auth_profiles:\n  buy7:\n    token_dir: /tmp/buy7\n"
+        "profiles:\n  buy7:\n    token_dir: /tmp/buy7\n"
     )
 
     auth_path = tmp_path / "buy7" / "auth.json"
@@ -124,7 +124,7 @@ def test_chatgpt_login_cli_force_backs_up_existing_auth(tmp_path: Path) -> None:
             [
                 "login",
                 "buy7",
-                "--config",
+                "--inventory",
                 str(config_path),
                 "--force",
             ],
@@ -139,7 +139,7 @@ def test_chatgpt_login_cli_force_backs_up_existing_auth(tmp_path: Path) -> None:
 def test_chatgpt_login_cli_device_mode_is_opt_in(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "chatgpt_auth_profiles:\n  buy3:\n    token_dir: /tmp/buy3\n"
+        "profiles:\n  buy3:\n    token_dir: /tmp/buy3\n"
     )
 
     mock_authenticator = MagicMock()
@@ -157,7 +157,7 @@ def test_chatgpt_login_cli_device_mode_is_opt_in(tmp_path: Path) -> None:
         return_value=mock_authenticator,
     ):
         result = runner.invoke(
-            cli, ["login", "buy3", "--config", str(config_path), "--device"]
+            cli, ["login", "buy3", "--inventory", str(config_path), "--device"]
         )
 
     assert result.exit_code == 0
@@ -169,7 +169,7 @@ def test_chatgpt_login_cli_device_mode_is_opt_in(tmp_path: Path) -> None:
 def test_chatgpt_login_cli_complete_requires_pending_session(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "chatgpt_auth_profiles:\n  buy2:\n    token_dir: /tmp/buy2\n"
+        "profiles:\n  buy2:\n    token_dir: /tmp/buy2\n"
     )
 
     mock_authenticator = MagicMock()
@@ -185,7 +185,7 @@ def test_chatgpt_login_cli_complete_requires_pending_session(tmp_path: Path) -> 
             [
                 "login",
                 "buy2",
-                "--config",
+                "--inventory",
                 str(config_path),
                 "--callback-url",
                 "http://localhost:1455/auth/callback?code=abc&state=xyz",
@@ -200,16 +200,16 @@ def test_chatgpt_login_cli_requires_config_file(tmp_path: Path) -> None:
     missing_config = tmp_path / "missing.yaml"
     runner = CliRunner()
 
-    result = runner.invoke(cli, ["login", "buy1", "--config", str(missing_config)])
+    result = runner.invoke(cli, ["login", "buy1", "--inventory", str(missing_config)])
 
     assert result.exit_code != 0
-    assert f"Config not found: {missing_config}" in result.output
+    assert f"Inventory not found: {missing_config}" in result.output
 
 
 def test_chatgpt_usage_cli_prints_all_profiles(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "chatgpt_auth_profiles:\n  buy2:\n    token_dir: /tmp/buy2\n  my:\n    token_dir: /tmp/my\n"
+        "profiles:\n  buy2:\n    token_dir: /tmp/buy2\n  my:\n    token_dir: /tmp/my\n"
     )
 
     runner = CliRunner()
@@ -234,7 +234,7 @@ def test_chatgpt_usage_cli_prints_all_profiles(tmp_path: Path) -> None:
             ),
         ],
     ) as mock_fetch_usage:
-        result = runner.invoke(cli, ["usage", "--config", str(config_path)])
+        result = runner.invoke(cli, ["usage", "--inventory", str(config_path)])
 
     assert result.exit_code == 0
     assert "profile" in result.output
@@ -248,7 +248,7 @@ def test_chatgpt_usage_cli_prints_all_profiles(tmp_path: Path) -> None:
 def test_chatgpt_usage_cli_can_emit_json(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "chatgpt_auth_profiles:\n  buy2:\n    token_dir: /tmp/buy2\n"
+        "profiles:\n  buy2:\n    token_dir: /tmp/buy2\n"
     )
 
     runner = CliRunner()
@@ -263,7 +263,7 @@ def test_chatgpt_usage_cli_can_emit_json(tmp_path: Path) -> None:
             status="ok",
         ),
     ):
-        result = runner.invoke(cli, ["usage", "buy2", "--config", str(config_path), "--json"])
+        result = runner.invoke(cli, ["usage", "buy2", "--inventory", str(config_path), "--json"])
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
@@ -274,7 +274,7 @@ def test_chatgpt_usage_cli_can_emit_json(tmp_path: Path) -> None:
 def test_chatgpt_usage_cli_uses_config_file_path_env_var(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "chatgpt_auth_profiles:\n  buy2:\n    token_dir: /tmp/buy2\n"
+        "profiles:\n  buy2:\n    token_dir: /tmp/buy2\n"
     )
 
     runner = CliRunner()
@@ -292,7 +292,7 @@ def test_chatgpt_usage_cli_uses_config_file_path_env_var(tmp_path: Path) -> None
         result = runner.invoke(
             cli,
             ["usage", "buy2", "--json"],
-            env={"CONFIG_FILE_PATH": str(config_path)},
+            env={"CHATGPT_INVENTORY_PATH": str(config_path)},
         )
 
     assert result.exit_code == 0
@@ -303,8 +303,8 @@ def test_chatgpt_usage_cli_uses_config_file_path_env_var(tmp_path: Path) -> None
 def test_chatgpt_resolve_config_prefers_yaml_before_yml(tmp_path: Path) -> None:
     standard_config = tmp_path / "config.yaml"
     secondary_config = tmp_path / "config.yml"
-    standard_config.write_text("chatgpt_auth_profiles: {}\n")
-    secondary_config.write_text("chatgpt_auth_profiles: {}\n")
+    standard_config.write_text("profiles: {}\n")
+    secondary_config.write_text("profiles: {}\n")
 
     with patch("litellm.llms.chatgpt.login_cli.DEFAULT_CONFIG", standard_config), patch(
         "litellm.llms.chatgpt.login_cli.DEFAULT_CONFIG_CANDIDATES",
@@ -382,6 +382,14 @@ def test_chatgpt_usage_metrics_exporter_updates_prometheus_gauges() -> None:
     assert 'litellm_chatgpt_profile_subscription_expires_timestamp_seconds{profile="buy2"} 1.779267024e+09' in payload
     assert 'litellm_chatgpt_profile_subscription_renews_timestamp_seconds{profile="buy2"} 1.779177024e+09' in payload
     assert 'litellm_chatgpt_profile_plan_info{account_type="plus",profile="buy2"} 1.0' in payload
+    assert registry.get_sample_value(
+        "litellm_chatgpt_profile_weekly_remaining_ratio",
+        {"profile": "buy2"},
+    ) == pytest.approx(0.2)
+    assert (
+        'litellm_chatgpt_profile_effective_deadline_timestamp_seconds{profile="buy2"} 1.7006e+09'
+        in payload
+    )
     assert (
         'litellm_chatgpt_usage_window_limit_seconds{profile="buy2",window="5h"} 18000.0'
         in payload
@@ -394,10 +402,10 @@ def test_chatgpt_usage_metrics_exporter_updates_prometheus_gauges() -> None:
 
 def test_chatgpt_profile_add_defaults_token_dir_next_to_config_file(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
-    config_path.write_text("chatgpt_auth_profiles:\n  buy1:\n    token_dir: /tmp/buy1\n")
+    config_path.write_text("profiles:\n  buy1:\n    token_dir: /tmp/buy1\n")
 
     runner = CliRunner()
-    result = runner.invoke(cli, ["profile", "add", "buy8", "--config", str(config_path)])
+    result = runner.invoke(cli, ["profile", "add", "buy8", "--inventory", str(config_path)])
 
     assert result.exit_code == 0
     assert "updated profile: buy8" in result.output
@@ -424,7 +432,7 @@ def test_chatgpt_profile_add_preserves_yaml_comments(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "# top-level comment\n"
-        "chatgpt_auth_profiles:\n"
+        "profiles:\n"
         "  # existing profile comment\n"
         "  buy1: # inline profile comment\n"
         "    token_dir: /tmp/buy1\n"
@@ -433,7 +441,7 @@ def test_chatgpt_profile_add_preserves_yaml_comments(tmp_path: Path) -> None:
     )
 
     runner = CliRunner()
-    result = runner.invoke(cli, ["profile", "add", "buy8", "--config", str(config_path)])
+    result = runner.invoke(cli, ["profile", "add", "buy8", "--inventory", str(config_path)])
 
     assert result.exit_code == 0
     data = config_path.read_text()
@@ -446,7 +454,7 @@ def test_chatgpt_profile_add_preserves_yaml_comments(tmp_path: Path) -> None:
 
 def test_chatgpt_profile_add_updates_json_config_with_custom_paths(tmp_path: Path) -> None:
     config_path = tmp_path / "config.json"
-    config_path.write_text(json.dumps({"chatgpt_auth_profiles": {}}))
+    config_path.write_text(json.dumps({"profiles": {}}))
 
     runner = CliRunner()
     result = runner.invoke(
@@ -455,7 +463,7 @@ def test_chatgpt_profile_add_updates_json_config_with_custom_paths(tmp_path: Pat
             "profile",
             "add",
             "buy9",
-            "--config",
+            "--inventory",
             str(config_path),
             "--token-dir",
             str(tmp_path / "tokens" / "buy9"),
@@ -466,15 +474,22 @@ def test_chatgpt_profile_add_updates_json_config_with_custom_paths(tmp_path: Pat
 
     assert result.exit_code == 0
     payload = json.loads(config_path.read_text())
-    assert payload["chatgpt_auth_profiles"]["buy9"]["token_dir"] == str(
+    assert payload["profiles"]["buy9"]["token_dir"] == str(
         (tmp_path / "tokens" / "buy9").resolve()
     )
-    assert payload["chatgpt_auth_profiles"]["buy9"]["auth_file"] == "custom.json"
+    assert payload["profiles"]["buy9"]["auth_file"] == "custom.json"
 
 
-def test_chatgpt_profile_add_with_deployment_updates_model_list(tmp_path: Path) -> None:
+def test_chatgpt_profile_add_preserves_existing_weight_and_enabled(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
-    config_path.write_text("chatgpt_auth_profiles: {}\nmodel_list: []\n")
+    config_path.write_text(
+        "profiles:\n"
+        "  buy10:\n"
+        "    token_dir: /tmp/old-buy10\n"
+        "    enabled: false\n"
+        "    weight: 7\n"
+        "models: {}\n"
+    )
 
     runner = CliRunner()
     result = runner.invoke(
@@ -483,32 +498,26 @@ def test_chatgpt_profile_add_with_deployment_updates_model_list(tmp_path: Path) 
             "profile",
             "add",
             "buy10",
-            "--config",
+            "--inventory",
             str(config_path),
-            "--with-deployment",
-            "--model-name",
-            "gpt-5.4-mini-pool",
-            "--provider-model",
-            "chatgpt/gpt-5.4-mini",
         ],
     )
 
     assert result.exit_code == 0
     payload = config_path.read_text()
     assert "buy10:" in payload
-    assert "gpt-5.4-mini-pool" in payload
-    assert "chatgpt-buy10" in payload
-    assert "chatgpt/gpt-5.4-mini" in payload
+    assert "enabled: false" in payload
+    assert "weight: 7" in payload
 
 
 def test_chatgpt_profile_rm_removes_profile_from_config(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "chatgpt_auth_profiles:\n  buy1:\n    token_dir: /tmp/buy1\n  buy2:\n    token_dir: /tmp/buy2\n"
+        "profiles:\n  buy1:\n    token_dir: /tmp/buy1\n  buy2:\n    token_dir: /tmp/buy2\n"
     )
 
     runner = CliRunner()
-    result = runner.invoke(cli, ["profile", "rm", "buy2", "--config", str(config_path)])
+    result = runner.invoke(cli, ["profile", "rm", "buy2", "--inventory", str(config_path)])
 
     assert result.exit_code == 0
     assert "removed profile: buy2" in result.output
@@ -523,7 +532,7 @@ def test_chatgpt_profile_rm_deletes_pending_browser_session_by_default(
     token_dir = tmp_path / "buy2"
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        f"chatgpt_auth_profiles:\n  buy2:\n    token_dir: {token_dir}\n"
+        f"profiles:\n  buy2:\n    token_dir: {token_dir}\n"
     )
     token_dir.mkdir(parents=True, exist_ok=True)
     session_path = token_dir / "browser-login-session.json"
@@ -532,7 +541,7 @@ def test_chatgpt_profile_rm_deletes_pending_browser_session_by_default(
     auth_path.write_text(json.dumps({"access_token": "token"}))
 
     runner = CliRunner()
-    result = runner.invoke(cli, ["profile", "rm", "buy2", "--config", str(config_path)])
+    result = runner.invoke(cli, ["profile", "rm", "buy2", "--inventory", str(config_path)])
 
     assert result.exit_code == 0
     assert not session_path.exists()
@@ -545,7 +554,7 @@ def test_chatgpt_profile_rm_can_purge_auth_files(tmp_path: Path) -> None:
     token_dir = tmp_path / "buy2"
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        f"chatgpt_auth_profiles:\n  buy2:\n    token_dir: {token_dir}\n"
+        f"profiles:\n  buy2:\n    token_dir: {token_dir}\n"
     )
     token_dir.mkdir(parents=True, exist_ok=True)
     (token_dir / "browser-login-session.json").write_text(json.dumps({"state": "xyz"}))
@@ -554,7 +563,7 @@ def test_chatgpt_profile_rm_can_purge_auth_files(tmp_path: Path) -> None:
     runner = CliRunner()
     result = runner.invoke(
         cli,
-        ["profile", "rm", "buy2", "--config", str(config_path), "--purge-files"],
+        ["profile", "rm", "buy2", "--inventory", str(config_path), "--purge-files"],
     )
 
     assert result.exit_code == 0
@@ -565,63 +574,116 @@ def test_chatgpt_profile_rm_can_purge_auth_files(tmp_path: Path) -> None:
 
 def test_chatgpt_profile_rm_requires_existing_profile(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
-    config_path.write_text("chatgpt_auth_profiles:\n  buy1:\n    token_dir: /tmp/buy1\n")
+    config_path.write_text("profiles:\n  buy1:\n    token_dir: /tmp/buy1\n")
 
     runner = CliRunner()
     result = runner.invoke(
-        cli, ["profile", "rm", "missing", "--config", str(config_path)]
+        cli, ["profile", "rm", "missing", "--inventory", str(config_path)]
     )
 
     assert result.exit_code != 0
-    assert "Profile 'missing' not found in chatgpt_auth_profiles" in result.output
+    assert "Profile 'missing' not found in profiles" in result.output
 
 
-def test_chatgpt_profile_ls_prints_profiles_and_deployments(tmp_path: Path) -> None:
+def test_chatgpt_profile_ls_prints_profiles_and_status(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "chatgpt_auth_profiles:\n"
+        "profiles:\n"
         "  buy1:\n"
         "    token_dir: /tmp/buy1\n"
+        "    enabled: true\n"
+        "    weight: 1\n"
         "  buy2:\n"
         "    token_dir: /tmp/buy2\n"
-        "model_list:\n"
-        "  - model_name: gpt-5.4\n"
-        "    model_info:\n"
-        "      id: chatgpt-buy1\n"
-        "      mode: responses\n"
-        "    litellm_params:\n"
-        "      model: chatgpt/gpt-5.4\n"
-        "      chatgpt_auth_profile: buy1\n"
+        "    enabled: false\n"
+        "    weight: 3\n"
+        "models: {}\n"
     )
 
     runner = CliRunner()
-    result = runner.invoke(cli, ["profile", "ls", "--config", str(config_path)])
+    result = runner.invoke(cli, ["profile", "ls", "--inventory", str(config_path)])
 
     assert result.exit_code == 0
     assert "buy1" in result.output
     assert "buy2" in result.output
-    assert "chatgpt-buy1 (gpt-5.4)" in result.output
+    assert "False" in result.output
+    assert "3" in result.output
 
 
 def test_chatgpt_profile_ls_can_emit_json(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "chatgpt_auth_profiles:\n"
+        "profiles:\n"
         "  buy1:\n"
         "    token_dir: /tmp/buy1\n"
-        "model_list:\n"
-        "  - model_name: gpt-5.4\n"
-        "    model_info:\n"
-        "      id: chatgpt-buy1\n"
-        "    litellm_params:\n"
-        "      model: chatgpt/gpt-5.4\n"
-        "      chatgpt_auth_profile: buy1\n"
+        "    enabled: true\n"
+        "    weight: 2\n"
+        "models: {}\n"
     )
 
     runner = CliRunner()
-    result = runner.invoke(cli, ["profile", "ls", "--config", str(config_path), "--json"])
+    result = runner.invoke(cli, ["profile", "ls", "--inventory", str(config_path), "--json"])
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload[0]["profile"] == "buy1"
-    assert payload[0]["deployments"][0]["id"] == "chatgpt-buy1"
+    assert payload[0]["enabled"] is True
+    assert payload[0]["weight"] == 2
+
+
+
+def test_chatgpt_profile_add_updates_inventory_yaml_and_defaults_token_dir_next_to_inventory(tmp_path: Path) -> None:
+    inventory_path = tmp_path / "inventory.yaml"
+    inventory_path.write_text(
+        "profiles:\n"
+        "  buy1:\n"
+        "    token_dir: /tmp/buy1\n"
+        "    enabled: true\n"
+        "    weight: 1\n"
+        "models: {}\n"
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["profile", "add", "buy8", "--inventory", str(inventory_path)],
+    )
+
+    assert result.exit_code == 0
+    assert "updated profile: buy8" in result.output
+    payload = inventory_path.read_text()
+    assert "profiles:" in payload
+    assert "buy8:" in payload
+    assert str((tmp_path / "chatgpt" / "buy8").resolve()) in payload
+    assert "enabled: true" in payload
+    assert "weight: 1" in payload
+
+
+def test_chatgpt_profile_ls_reads_inventory_and_emits_json(tmp_path: Path) -> None:
+    inventory_path = tmp_path / "inventory.yaml"
+    inventory_path.write_text(
+        "profiles:\n"
+        "  buy1:\n"
+        "    token_dir: /tmp/buy1\n"
+        "    enabled: true\n"
+        "    weight: 1\n"
+        "  buy2:\n"
+        "    token_dir: /tmp/buy2\n"
+        "    enabled: false\n"
+        "    weight: 3\n"
+        "models: {}\n"
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["profile", "ls", "--inventory", str(inventory_path), "--json"],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload[0]["profile"] == "buy1"
+    assert payload[0]["enabled"] is True
+    assert payload[1]["profile"] == "buy2"
+    assert payload[1]["enabled"] is False
+    assert payload[1]["weight"] == 3
