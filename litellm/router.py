@@ -68,6 +68,9 @@ from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLogging
 from litellm.litellm_core_utils.sensitive_data_masker import SensitiveDataMasker
 from litellm.llms.openai_like.json_loader import JSONProviderRegistry
 from litellm.router_strategy.budget_limiter import RouterBudgetLimiting
+from litellm.router_strategy.chatgpt_pacing_weighted_shuffle import (
+    ChatGPTPacingWeightedShuffle,
+)
 from litellm.router_strategy.least_busy import LeastBusyLoggingHandler
 from litellm.router_strategy.lowest_cost import LowestCostLoggingHandler
 from litellm.router_strategy.lowest_latency import LowestLatencyLoggingHandler
@@ -296,6 +299,7 @@ class Router:
             "latency-based-routing",
             "cost-based-routing",
             "usage-based-routing-v2",
+            "chatgpt-pacing-weighted-shuffle",
         ] = "simple-shuffle",
         optional_pre_call_checks: Optional[OptionalPreCallChecks] = None,
         routing_strategy_args: dict = {},  # just for latency-based
@@ -334,7 +338,7 @@ class Router:
             retry_after (int): Minimum time to wait before retrying a failed request. Defaults to 0.
             allowed_fails (Optional[int]): Number of allowed fails before adding to cooldown. Defaults to None.
             cooldown_time (float): Time to cooldown a deployment after failure in seconds. Defaults to 1.
-            routing_strategy (Literal["simple-shuffle", "least-busy", "usage-based-routing", "latency-based-routing", "cost-based-routing"]): Routing strategy. Defaults to "simple-shuffle".
+            routing_strategy (Literal["simple-shuffle", "least-busy", "usage-based-routing", "latency-based-routing", "cost-based-routing", "usage-based-routing-v2", "chatgpt-pacing-weighted-shuffle"]): Routing strategy. Defaults to "simple-shuffle".
             routing_strategy_args (dict): Additional args for latency-based routing. Defaults to {}.
             alerting_config (AlertingConfig): Slack alerting configuration. Defaults to None.
             provider_budget_config (ProviderBudgetConfig): Provider budget configuration. Use this to set llm_provider budget limits. example $100/day to OpenAI, $100/day to Azure, etc. Defaults to None.
@@ -519,6 +523,7 @@ class Router:
 
         self.retry_after = retry_after
         self.routing_strategy = routing_strategy
+        self.chatgpt_usage_service = ChatGPTUsageService()
 
         ## SETTING FALLBACKS ##
         ### validate if it's set + in correct format
@@ -816,6 +821,14 @@ class Router:
             )
             if isinstance(litellm.callbacks, list):
                 litellm.logging_callback_manager.add_litellm_callback(self.lowesttpm_logger_v2)  # type: ignore
+        elif (
+            routing_strategy == RoutingStrategy.CHATGPT_PACING_WEIGHTED_SHUFFLE.value
+            or routing_strategy == RoutingStrategy.CHATGPT_PACING_WEIGHTED_SHUFFLE
+        ):
+            self.chatgpt_pacing_weighted_shuffle = ChatGPTPacingWeightedShuffle(
+                usage_service=self.chatgpt_usage_service,
+                routing_args=routing_strategy_args,
+            )
         elif (
             routing_strategy == RoutingStrategy.LATENCY_BASED.value
             or routing_strategy == RoutingStrategy.LATENCY_BASED
@@ -1344,7 +1357,7 @@ class Router:
                 _callback = ModelRateLimitingCheck(dual_cache=self.cache)
             elif pre_call_check == "chatgpt_usage_health_check":
                 _callback = ChatGPTUsageHealthCheck(
-                    usage_service=ChatGPTUsageService(),
+                    usage_service=self.chatgpt_usage_service,
                 )
 
             if _callback is None:
@@ -9120,6 +9133,7 @@ class Router:
             and self.routing_strategy != "cost-based-routing"
             and self.routing_strategy != "latency-based-routing"
             and self.routing_strategy != "least-busy"
+            and self.routing_strategy != "chatgpt-pacing-weighted-shuffle"
         ):  # prevent regressions for other routing strategies, that don't have async get available deployments implemented.
             return self.get_available_deployment(
                 model=model,
@@ -9208,6 +9222,19 @@ class Router:
                     llm_router_instance=self,
                     healthy_deployments=healthy_deployments,
                     model=model,
+                )
+            elif (
+                self.routing_strategy == "chatgpt-pacing-weighted-shuffle"
+                and hasattr(self, "chatgpt_pacing_weighted_shuffle")
+            ):
+                deployment = (
+                    await self.chatgpt_pacing_weighted_shuffle.async_get_available_deployments(
+                        model_group=model,
+                        healthy_deployments=healthy_deployments,  # type: ignore
+                        messages=messages,
+                        input=input,
+                        request_kwargs=request_kwargs,
+                    )
                 )
             elif (
                 self.routing_strategy == "least-busy"
@@ -9358,6 +9385,19 @@ class Router:
                     llm_router_instance=self,
                     healthy_deployments=pass_through_deployments,
                     model=model,
+                )
+            elif (
+                self.routing_strategy == "chatgpt-pacing-weighted-shuffle"
+                and hasattr(self, "chatgpt_pacing_weighted_shuffle")
+            ):
+                deployment = (
+                    await self.chatgpt_pacing_weighted_shuffle.async_get_available_deployments(
+                        model_group=model,
+                        healthy_deployments=pass_through_deployments,  # type: ignore
+                        messages=messages,
+                        input=input,
+                        request_kwargs=request_kwargs,
+                    )
                 )
             elif (
                 self.routing_strategy == "least-busy"
@@ -9523,6 +9563,17 @@ class Router:
                 model=model,
             )
         elif (
+            self.routing_strategy == "chatgpt-pacing-weighted-shuffle"
+            and hasattr(self, "chatgpt_pacing_weighted_shuffle")
+        ):
+            deployment = self.chatgpt_pacing_weighted_shuffle.get_available_deployments(
+                model_group=model,
+                healthy_deployments=healthy_deployments,  # type: ignore
+                messages=messages,
+                input=input,
+                request_kwargs=request_kwargs,
+            )
+        elif (
             self.routing_strategy == "latency-based-routing"
             and self.lowestlatency_logger is not None
         ):
@@ -9683,6 +9734,17 @@ class Router:
                 llm_router_instance=self,
                 healthy_deployments=pass_through_deployments,
                 model=model,
+            )
+        elif (
+            self.routing_strategy == "chatgpt-pacing-weighted-shuffle"
+            and hasattr(self, "chatgpt_pacing_weighted_shuffle")
+        ):
+            deployment = self.chatgpt_pacing_weighted_shuffle.get_available_deployments(
+                model_group=model,
+                healthy_deployments=pass_through_deployments,  # type: ignore
+                messages=messages,
+                input=input,
+                request_kwargs=request_kwargs,
             )
         elif (
             self.routing_strategy == "latency-based-routing"

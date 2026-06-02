@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 from typing import List, Literal, Optional
 
 from litellm._logging import verbose_router_logger
 from litellm.integrations.custom_logger import CustomLogger, Span
-from litellm.llms.chatgpt.usage_service import ChatGPTUsageService, UsageResult
+from litellm.llms.chatgpt.usage_service import (
+    ChatGPTUsageService,
+    UsageResult,
+    _effective_available_from_result,
+    is_usage_result_expired,
+)
 from litellm.types.llms.openai import AllMessageValues
 
 
@@ -53,8 +59,12 @@ class ChatGPTUsageHealthCheck(CustomLogger):
 
     @staticmethod
     def evaluate_usage_result(
-        usage_result: UsageResult, *, block_at_used_percent: float = 100.0
+        usage_result: UsageResult,
+        *,
+        block_at_used_percent: float = 100.0,
+        now: Optional[float] = None,
     ) -> ChatGPTUsageRoutingDecision:
+        reference_time = now if now is not None else time.time()
         if usage_result.status != "ok":
             reason = ChatGPTUsageHealthCheck._blocking_error_reason(usage_result.error)
             if reason is not None:
@@ -63,6 +73,18 @@ class ChatGPTUsageHealthCheck(CustomLogger):
                     reason=reason,
                 )
             return ChatGPTUsageRoutingDecision(action="allow")
+
+        if is_usage_result_expired(usage_result, now=reference_time):
+            return ChatGPTUsageRoutingDecision(
+                action="block",
+                reason="subscription_expired",
+            )
+
+        if not _effective_available_from_result(usage_result):
+            return ChatGPTUsageRoutingDecision(
+                action="block",
+                reason="usage_profile_unavailable",
+            )
 
         blocked_windows = tuple(
             window.label
@@ -112,6 +134,7 @@ class ChatGPTUsageHealthCheck(CustomLogger):
             decision = self.evaluate_usage_result(
                 snapshot.result,
                 block_at_used_percent=self.block_at_used_percent,
+                now=time.time(),
             )
             if decision.action == "block":
                 blocked_deployments.append(deployment)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -49,6 +50,16 @@ class ChatGPTUsageSnapshot:
     profile: str
     result: UsageResult
     refreshed_at: float
+
+
+@dataclass(frozen=True)
+class ChatGPTPacingInfo:
+    window_label: str
+    window_limit_seconds: Optional[int]
+    remaining_ratio: float
+    effective_deadline_at: Optional[int]
+    time_ratio: Optional[float]
+    pace_ratio: Optional[float]
 
 
 class ChatGPTUsageMetrics:
@@ -137,6 +148,18 @@ class ChatGPTUsageMetrics:
             labelnames=["profile", "window"],
             registry=registry,
         )
+        self.profile_weekly_remaining_ratio = Gauge(
+            "litellm_chatgpt_profile_weekly_remaining_ratio",
+            "Remaining ratio for the preferred weekly pacing window.",
+            labelnames=["profile"],
+            registry=registry,
+        )
+        self.profile_effective_deadline_timestamp = Gauge(
+            "litellm_chatgpt_profile_effective_deadline_timestamp_seconds",
+            "Earliest routing deadline derived from weekly reset and subscription expiry.",
+            labelnames=["profile"],
+            registry=registry,
+        )
         self._known_profiles: set[str] = set()
         self._known_windows: set[tuple[str, str]] = set()
         self._known_plan_labels: set[tuple[str, str]] = set()
@@ -184,6 +207,16 @@ class ChatGPTUsageMetrics:
                 if result.credits_balance is not None
                 else float("nan")
             )
+            pacing_info = compute_chatgpt_pacing_info(result, now=refreshed_at)
+            self.profile_weekly_remaining_ratio.labels(profile=profile).set(
+                pacing_info.remaining_ratio if pacing_info is not None else float("nan")
+            )
+            self.profile_effective_deadline_timestamp.labels(profile=profile).set(
+                float(pacing_info.effective_deadline_at)
+                if pacing_info is not None
+                and pacing_info.effective_deadline_at is not None
+                else float("nan")
+            )
 
             for window in result.windows:
                 window_key = (profile, window.label)
@@ -218,6 +251,8 @@ class ChatGPTUsageMetrics:
             self.profile_subscription_expires_timestamp.remove(profile)
             self.profile_subscription_renews_timestamp.remove(profile)
             self.credits_balance.remove(profile)
+            self.profile_weekly_remaining_ratio.remove(profile)
+            self.profile_effective_deadline_timestamp.remove(profile)
 
         for profile, window in self._known_windows - active_windows:
             self.window_used_percent.remove(profile, window)
@@ -298,6 +333,10 @@ def _optional_bool_to_gauge_value(value: Optional[bool]) -> float:
     return 1.0 if value else 0.0
 
 
+def _clamp(value: float, minimum: float, maximum: float) -> float:
+    return max(minimum, min(maximum, value))
+
+
 def _compute_effective_available(
     *,
     status: str,
@@ -334,6 +373,96 @@ def _effective_available_from_result(result: UsageResult) -> bool:
         rate_limit_allowed=result.rate_limit_allowed,
         rate_limit_reached=result.rate_limit_reached,
         has_active_subscription=result.has_active_subscription,
+    )
+
+
+def is_usage_result_expired(
+    result: UsageResult, *, now: Optional[float] = None
+) -> bool:
+    if result.subscription_expires_at is None:
+        return False
+    reference_time = now if now is not None else time.time()
+    return float(result.subscription_expires_at) <= reference_time
+
+
+def get_weekly_pacing_window(result: UsageResult) -> Optional[UsageWindow]:
+    preferred_window: Optional[UsageWindow] = None
+    for window in result.windows:
+        if window.label == "1w" or window.limit_seconds == 604800:
+            preferred_window = window
+            break
+
+    if preferred_window is not None:
+        return preferred_window
+
+    windows_with_limits = [
+        window
+        for window in result.windows
+        if isinstance(window.limit_seconds, int) and window.limit_seconds > 0
+    ]
+    if not windows_with_limits:
+        return None
+
+    return max(windows_with_limits, key=lambda window: int(window.limit_seconds or 0))
+
+
+def get_effective_deadline_at(
+    result: UsageResult, weekly_window: Optional[UsageWindow]
+) -> Optional[int]:
+    deadline_candidates: List[int] = []
+    if weekly_window is not None and weekly_window.reset_at is not None:
+        deadline_candidates.append(int(weekly_window.reset_at))
+    if result.subscription_expires_at is not None:
+        deadline_candidates.append(int(result.subscription_expires_at))
+    if not deadline_candidates:
+        return None
+    return min(deadline_candidates)
+
+
+def compute_chatgpt_pacing_info(
+    result: UsageResult,
+    *,
+    now: Optional[float] = None,
+    min_time_ratio: float = 0.02,
+) -> Optional[ChatGPTPacingInfo]:
+    weekly_window = get_weekly_pacing_window(result)
+    if weekly_window is None:
+        return None
+
+    remaining_ratio = _clamp(1.0 - (weekly_window.used_percent / 100.0), 0.0, 1.0)
+    effective_deadline_at = get_effective_deadline_at(result, weekly_window)
+    window_limit_seconds = weekly_window.limit_seconds
+
+    if (
+        effective_deadline_at is None
+        or window_limit_seconds is None
+        or window_limit_seconds <= 0
+    ):
+        return ChatGPTPacingInfo(
+            window_label=weekly_window.label,
+            window_limit_seconds=window_limit_seconds,
+            remaining_ratio=remaining_ratio,
+            effective_deadline_at=effective_deadline_at,
+            time_ratio=None,
+            pace_ratio=None,
+        )
+
+    reference_time = now if now is not None else time.time()
+    remaining_seconds = max(float(effective_deadline_at) - reference_time, 0.0)
+    bounded_min_time_ratio = _clamp(float(min_time_ratio), 1e-9, 1.0)
+    time_ratio = _clamp(
+        remaining_seconds / float(window_limit_seconds),
+        bounded_min_time_ratio,
+        1.0,
+    )
+    pace_ratio = remaining_ratio / time_ratio
+    return ChatGPTPacingInfo(
+        window_label=weekly_window.label,
+        window_limit_seconds=window_limit_seconds,
+        remaining_ratio=remaining_ratio,
+        effective_deadline_at=effective_deadline_at,
+        time_ratio=time_ratio,
+        pace_ratio=pace_ratio,
     )
 
 
@@ -680,6 +809,7 @@ class ChatGPTUsageService:
         self.usage_url = usage_url or get_usage_url()
         self._snapshots: Dict[str, ChatGPTUsageSnapshot] = {}
         self._profile_locks: Dict[str, asyncio.Lock] = {}
+        self._profile_sync_locks: Dict[str, threading.Lock] = {}
         self._known_profiles: set[str] = set()
         self._background_refresh_task: Optional[asyncio.Task[Any]] = None
 
@@ -728,6 +858,22 @@ class ChatGPTUsageService:
             return snapshot
         return None
 
+    def get_snapshot_sync(
+        self, profile: str, *, allow_stale: bool = True
+    ) -> Optional[ChatGPTUsageSnapshot]:
+        self._known_profiles.add(profile)
+
+        snapshot = self._snapshots.get(profile)
+        if snapshot is not None and not self._is_stale(snapshot):
+            return snapshot
+
+        snapshot = self.refresh_profile_sync(profile)
+        if snapshot is None:
+            return None
+        if allow_stale or not self._is_stale(snapshot):
+            return snapshot
+        return None
+
     async def refresh_profile(self, profile: str) -> Optional[ChatGPTUsageSnapshot]:
         lock = self._profile_locks.setdefault(profile, asyncio.Lock())
         async with lock:
@@ -740,6 +886,22 @@ class ChatGPTUsageService:
                 profile,
                 self.usage_url,
             )
+            snapshot = ChatGPTUsageSnapshot(
+                profile=profile,
+                result=result,
+                refreshed_at=time.time(),
+            )
+            self._snapshots[profile] = snapshot
+            return snapshot
+
+    def refresh_profile_sync(self, profile: str) -> Optional[ChatGPTUsageSnapshot]:
+        lock = self._profile_sync_locks.setdefault(profile, threading.Lock())
+        with lock:
+            snapshot = self._snapshots.get(profile)
+            if snapshot is not None and not self._is_stale(snapshot):
+                return snapshot
+
+            result = fetch_usage_for_profile(profile, self.usage_url)
             snapshot = ChatGPTUsageSnapshot(
                 profile=profile,
                 result=result,

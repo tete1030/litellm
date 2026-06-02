@@ -1,9 +1,15 @@
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from litellm.llms.chatgpt.common_utils import RefreshAccessTokenError
 from litellm.llms.chatgpt.usage_service import (
+    compute_chatgpt_pacing_info,
     _extract_account_metadata,
     fetch_usage_for_profile,
+    get_effective_deadline_at,
+    get_weekly_pacing_window,
+    is_usage_result_expired,
     normalize_usage_payload,
 )
 
@@ -118,3 +124,93 @@ def test_fetch_usage_for_profile_applies_accounts_metadata_to_availability() -> 
     assert result.subscription_expires_at == 1779267024
     assert result.subscription_renews_at == 1779177024
     assert result.effective_available is False
+
+
+def test_compute_chatgpt_pacing_info_prefers_weekly_window_and_earliest_deadline() -> None:
+    result = normalize_usage_payload(
+        profile="buy2",
+        account_id="acct-buy2",
+        payload={
+            "plan_type": "plus",
+            "rate_limit": {
+                "allowed": True,
+                "limit_reached": False,
+                "primary_window": {
+                    "limit_window_seconds": 18000,
+                    "used_percent": 25,
+                    "reset_at": 1700003600,
+                },
+                "secondary_window": {
+                    "limit_window_seconds": 604800,
+                    "used_percent": 80,
+                    "reset_at": 1700600000,
+                },
+            },
+        },
+    )
+    result.subscription_expires_at = 1700300000
+
+    weekly_window = get_weekly_pacing_window(result)
+    assert weekly_window is not None
+    assert weekly_window.label == "1w"
+    assert get_effective_deadline_at(result, weekly_window) == 1700300000
+
+    pacing_info = compute_chatgpt_pacing_info(
+        result,
+        now=1700000000,
+        min_time_ratio=0.02,
+    )
+
+    assert pacing_info is not None
+    assert pacing_info.remaining_ratio == pytest.approx(0.2)
+    assert pacing_info.effective_deadline_at == 1700300000
+    assert pacing_info.time_ratio == pytest.approx(300000 / 604800)
+    assert pacing_info.pace_ratio == pytest.approx(0.2 / (300000 / 604800))
+
+
+def test_compute_chatgpt_pacing_info_falls_back_to_longest_window() -> None:
+    result = normalize_usage_payload(
+        profile="buy3",
+        account_id="acct-buy3",
+        payload={
+            "plan_type": "plus",
+            "rate_limit": {
+                "allowed": True,
+                "limit_reached": False,
+                "primary_window": {
+                    "limit_window_seconds": 43200,
+                    "used_percent": 10,
+                    "reset_at": 1700043200,
+                },
+                "secondary_window": {
+                    "limit_window_seconds": 259200,
+                    "used_percent": 40,
+                    "reset_at": 1700259200,
+                },
+            },
+        },
+    )
+
+    pacing_info = compute_chatgpt_pacing_info(result, now=1700000000)
+
+    assert pacing_info is not None
+    assert pacing_info.window_label == "3d"
+    assert pacing_info.remaining_ratio == pytest.approx(0.6)
+    assert pacing_info.effective_deadline_at == 1700259200
+
+
+def test_is_usage_result_expired_detects_past_subscription_deadline() -> None:
+    result = normalize_usage_payload(
+        profile="buy4",
+        account_id="acct-buy4",
+        payload={
+            "plan_type": "plus",
+            "rate_limit": {
+                "allowed": True,
+                "limit_reached": False,
+            },
+        },
+    )
+    result.subscription_expires_at = 1699999999
+
+    assert is_usage_result_expired(result, now=1700000000) is True

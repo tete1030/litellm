@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from click.testing import CliRunner
+import pytest
 from prometheus_client import CollectorRegistry, generate_latest
 
 from litellm.llms.chatgpt.authenticator import BrowserLoginSession
@@ -416,13 +417,13 @@ def test_chatgpt_profile_add_defaults_token_dir_next_to_config_file(tmp_path: Pa
 
 def test_chatgpt_profile_add_uses_config_file_path_env_for_default_token_dir(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
-    config_path.write_text("chatgpt_auth_profiles: {}\n")
+    config_path.write_text("profiles: {}\n")
 
     runner = CliRunner()
     result = runner.invoke(
         cli,
         ["profile", "add", "buy8"],
-        env={"CONFIG_FILE_PATH": str(config_path)},
+        env={"CHATGPT_INVENTORY_PATH": str(config_path)},
     )
 
     assert result.exit_code == 0

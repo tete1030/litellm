@@ -64,6 +64,7 @@ class RouterConfig(BaseModel):
         "least-busy",
         "usage-based-routing",
         "latency-based-routing",
+        "chatgpt-pacing-weighted-shuffle",
     ] = "simple-shuffle"
 
     model_config = ConfigDict(protected_namespaces=())
@@ -703,6 +704,7 @@ class RoutingStrategy(enum.Enum):
     COST_BASED = "cost-based-routing"
     USAGE_BASED_ROUTING_V2 = "usage-based-routing-v2"
     USAGE_BASED_ROUTING = "usage-based-routing"
+    CHATGPT_PACING_WEIGHTED_SHUFFLE = "chatgpt-pacing-weighted-shuffle"
     PROVIDER_BUDGET_LIMITING = "provider-budget-routing"
 
 

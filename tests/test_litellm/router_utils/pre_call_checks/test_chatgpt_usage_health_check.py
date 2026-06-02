@@ -103,6 +103,47 @@ def test_evaluate_usage_result_allows_non_blocking_usage_fetch_errors() -> None:
     assert decision.action == "allow"
 
 
+def test_evaluate_usage_result_blocks_effectively_unavailable_profiles() -> None:
+    usage_result = UsageResult(
+        profile="buy3-bus",
+        account_id="acct_123",
+        plan="free",
+        account_type="free",
+        credits_balance=0.0,
+        status="ok",
+        windows=[UsageWindow(label="1w", used_percent=20.0, reset_at=1700600000)],
+        effective_available=False,
+    )
+
+    decision = ChatGPTUsageHealthCheck.evaluate_usage_result(usage_result)
+
+    assert decision.action == "block"
+    assert decision.reason == "usage_profile_unavailable"
+
+
+def test_evaluate_usage_result_blocks_expired_subscription() -> None:
+    usage_result = UsageResult(
+        profile="buy9",
+        account_id="acct_123",
+        plan="plus",
+        account_type="plus",
+        credits_balance=5.0,
+        status="ok",
+        windows=[UsageWindow(label="1w", used_percent=20.0, reset_at=1700600000)],
+        has_active_subscription=True,
+        subscription_expires_at=1699999999,
+        effective_available=True,
+    )
+
+    decision = ChatGPTUsageHealthCheck.evaluate_usage_result(
+        usage_result,
+        now=1700000000,
+    )
+
+    assert decision.action == "block"
+    assert decision.reason == "subscription_expired"
+
+
 @pytest.mark.asyncio
 async def test_async_filter_deployments_blocks_only_exhausted_chatgpt_profiles() -> None:
     usage_service = MagicMock()
@@ -309,6 +350,33 @@ def test_router_registers_chatgpt_usage_health_check() -> None:
         isinstance(callback, ChatGPTUsageHealthCheck)
         for callback in router.optional_callbacks
     )
+
+
+def test_router_shares_usage_service_with_pacing_strategy() -> None:
+    router = litellm.Router(
+        model_list=[
+            {
+                "model_name": "gpt-5.3-codex",
+                "litellm_params": {
+                    "model": "chatgpt/gpt-5.3-codex",
+                    "chatgpt_auth_profile": "buy3-bus",
+                },
+                "model_info": {"id": "chatgpt-buy3-bus-codex"},
+            }
+        ],
+        routing_strategy="chatgpt-pacing-weighted-shuffle",
+        optional_pre_call_checks=["chatgpt_usage_health_check"],
+    )
+
+    assert router.optional_callbacks is not None
+    usage_callback = next(
+        callback
+        for callback in router.optional_callbacks
+        if isinstance(callback, ChatGPTUsageHealthCheck)
+    )
+
+    assert usage_callback.usage_service is router.chatgpt_usage_service
+    assert router.chatgpt_pacing_weighted_shuffle.usage_service is router.chatgpt_usage_service
 
 
 @pytest.mark.asyncio
