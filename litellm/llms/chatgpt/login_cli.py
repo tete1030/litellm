@@ -16,6 +16,13 @@ import litellm
 
 from .authenticator import BrowserLoginSession, get_chatgpt_authenticator
 from . import usage_service
+from .inventory_tools import (
+    doctor_inventory,
+    load_inventory,
+    render_config,
+    report_as_text,
+    update_rendered_config_file,
+)
 
 ChatGPTUsageMetrics = usage_service.ChatGPTUsageMetrics
 UsageResult = usage_service.UsageResult
@@ -217,6 +224,49 @@ def _update_profiles_in_config(
     updater(profiles)
     _save_config_file(config_path, data, format_name)
     return data, profiles
+
+
+def _update_models_in_config(
+    config_path: Path,
+    updater: Any,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    data, format_name = _load_config_with_format(config_path)
+    models = data.get("models")
+    if models is None:
+        models = {}
+        data["models"] = models
+    if not isinstance(models, dict):
+        raise click.ClickException(
+            "models must be a mapping in the inventory file"
+        )
+    data.setdefault("profiles", {})
+
+    updater(models)
+    _save_config_file(config_path, data, format_name)
+    return data, models
+
+
+def _model_ls_row(model_name: str, model_entry: Any) -> Dict[str, Any]:
+    entry = model_entry if isinstance(model_entry, dict) else {}
+    return {
+        "model_name": model_name,
+        "provider_model": entry.get("provider_model", "-"),
+        "mode": entry.get("mode", "responses"),
+        "deployment_id_template": entry.get(
+            "deployment_id_template", "chatgpt-{profile}"
+        ),
+        "enabled": bool(entry.get("enabled", True)),
+    }
+
+
+def _validate_weight(weight: int) -> int:
+    if weight < 1:
+        raise click.ClickException("weight must be >= 1")
+    return weight
+
+
+def _render_note() -> str:
+    return "note: rerun `litellm-chatgpt render` to regenerate LiteLLM config.yaml."
 
 
 def _prepare_profiles(config_path: Path, *, enabled_only: bool = False) -> Dict[str, Any]:
@@ -421,7 +471,7 @@ def profile_add(
     click.echo(f"auth_file:       {added_profile.get('auth_file', 'auth.json (default)')}")
     click.echo(f"enabled:         {added_profile.get('enabled', True)}")
     click.echo(f"weight:          {added_profile.get('weight', 1)}")
-    click.echo("note: rerun the inventory render script to regenerate LiteLLM config.yaml.")
+    click.echo(_render_note())
 
 
 @profile_group.command(name="ls")
@@ -542,9 +592,332 @@ def profile_rm(profile: str, config_path: str, purge_files: bool) -> None:
         click.echo(
             "note: auth.json is kept by default; use --purge-files to delete auth.json and attempt to remove the profile directory."
         )
+    click.echo(_render_note())
+
+
+@profile_group.command(name="enable")
+@click.argument("profile")
+@click.option(
+    "--inventory",
+    "config_path",
+    default=None,
+    show_default=DEFAULT_CONFIG_HELP,
+    help="ChatGPT inventory file containing profiles.",
+)
+def profile_enable(profile: str, config_path: str) -> None:
+    """Enable a named ChatGPT auth profile in inventory."""
+    resolved_config = _resolve_config_path(config_path)
+
+    def _updater(profiles: Dict[str, Any]) -> None:
+        if profile not in profiles:
+            raise click.ClickException(f"Profile '{profile}' not found in profiles")
+        entry = profiles.get(profile)
+        profile_entry = dict(entry) if isinstance(entry, dict) else {}
+        profile_entry["enabled"] = True
+        profiles[profile] = profile_entry
+
+    _, profiles = _update_profiles_in_config(resolved_config, _updater)
+    click.echo(f"enabled profile: {profile}")
+    click.echo(f"inventory:       {resolved_config}")
+    click.echo(f"enabled:         {profiles[profile].get('enabled', True)}")
+    click.echo(f"weight:          {profiles[profile].get('weight', 1)}")
+    click.echo(_render_note())
+
+
+@profile_group.command(name="disable")
+@click.argument("profile")
+@click.option(
+    "--inventory",
+    "config_path",
+    default=None,
+    show_default=DEFAULT_CONFIG_HELP,
+    help="ChatGPT inventory file containing profiles.",
+)
+def profile_disable(profile: str, config_path: str) -> None:
+    """Disable a named ChatGPT auth profile in inventory."""
+    resolved_config = _resolve_config_path(config_path)
+
+    def _updater(profiles: Dict[str, Any]) -> None:
+        if profile not in profiles:
+            raise click.ClickException(f"Profile '{profile}' not found in profiles")
+        entry = profiles.get(profile)
+        profile_entry = dict(entry) if isinstance(entry, dict) else {}
+        profile_entry["enabled"] = False
+        profiles[profile] = profile_entry
+
+    _, profiles = _update_profiles_in_config(resolved_config, _updater)
+    click.echo(f"disabled profile: {profile}")
+    click.echo(f"inventory:       {resolved_config}")
+    click.echo(f"enabled:         {profiles[profile].get('enabled', True)}")
+    click.echo(f"weight:          {profiles[profile].get('weight', 1)}")
+    click.echo(_render_note())
+
+
+@profile_group.command(name="set-weight")
+@click.argument("profile")
+@click.argument("weight", type=int)
+@click.option(
+    "--inventory",
+    "config_path",
+    default=None,
+    show_default=DEFAULT_CONFIG_HELP,
+    help="ChatGPT inventory file containing profiles.",
+)
+def profile_set_weight(profile: str, weight: int, config_path: str) -> None:
+    """Set profile weight in inventory."""
+    resolved_config = _resolve_config_path(config_path)
+    weight = _validate_weight(weight)
+
+    def _updater(profiles: Dict[str, Any]) -> None:
+        if profile not in profiles:
+            raise click.ClickException(f"Profile '{profile}' not found in profiles")
+        entry = profiles.get(profile)
+        profile_entry = dict(entry) if isinstance(entry, dict) else {}
+        profile_entry["weight"] = weight
+        profiles[profile] = profile_entry
+
+    _, profiles = _update_profiles_in_config(resolved_config, _updater)
+    click.echo(f"updated profile weight: {profile}")
+    click.echo(f"inventory:       {resolved_config}")
+    click.echo(f"enabled:         {profiles[profile].get('enabled', True)}")
+    click.echo(f"weight:          {profiles[profile].get('weight', 1)}")
+    click.echo(_render_note())
+
+
+@cli.group(name="model")
+def model_group() -> None:
+    """Manage ChatGPT inventory model entries."""
+
+
+@model_group.command(name="add")
+@click.argument("model_name")
+@click.option(
+    "--inventory",
+    "config_path",
+    default=None,
+    show_default=DEFAULT_CONFIG_HELP,
+    help="ChatGPT inventory file containing models.",
+)
+@click.option("--provider-model", required=True)
+@click.option("--mode", default="responses", show_default=True)
+@click.option(
+    "--deployment-id-template",
+    default="chatgpt-{profile}",
+    show_default=True,
+)
+@click.option("--disabled", is_flag=True)
+def model_add(
+    model_name: str,
+    config_path: str,
+    provider_model: str,
+    mode: str,
+    deployment_id_template: str,
+    disabled: bool,
+) -> None:
+    """Add or update a named model in inventory."""
+    resolved_config = _resolve_config_path(config_path, require_exists=False)
+
+    def _updater(models: Dict[str, Any]) -> None:
+        entry = models.get(model_name)
+        model_entry = dict(entry) if isinstance(entry, dict) else {}
+        model_entry["provider_model"] = provider_model
+        model_entry["mode"] = mode
+        model_entry["deployment_id_template"] = deployment_id_template
+        model_entry["enabled"] = not disabled
+        models[model_name] = model_entry
+
+    _, models = _update_models_in_config(resolved_config, _updater)
+    click.echo(f"updated model:    {model_name}")
+    click.echo(f"inventory:        {resolved_config}")
+    click.echo(f"provider_model:   {models[model_name].get('provider_model')}")
+    click.echo(f"mode:             {models[model_name].get('mode', 'responses')}")
     click.echo(
-        "note: rerun the inventory render script to remove this profile from generated model routes."
+        f"deployment_id_template: {models[model_name].get('deployment_id_template', 'chatgpt-{{profile}}')}"
     )
+    click.echo(f"enabled:          {bool(models[model_name].get('enabled', True))}")
+    click.echo(_render_note())
+
+
+@model_group.command(name="ls")
+@click.option(
+    "--inventory",
+    "config_path",
+    default=None,
+    show_default=DEFAULT_CONFIG_HELP,
+    help="ChatGPT inventory file containing models.",
+)
+@click.option("--json", "json_output", is_flag=True)
+def model_ls(config_path: str, json_output: bool) -> None:
+    """List configured inventory models."""
+    resolved_config = _resolve_config_path(config_path)
+    data = _load_config_file(resolved_config)
+    models = data.get("models") or {}
+    if not isinstance(models, dict):
+        raise click.ClickException("models must be a mapping in the inventory file")
+
+    rows = [_model_ls_row(model_name, models[model_name]) for model_name in sorted(models.keys())]
+    if json_output:
+        click.echo(json.dumps(rows, indent=2))
+        return
+
+    table_rows = [
+        [
+            item["model_name"],
+            str(item["provider_model"]),
+            str(item["mode"]),
+            str(item["deployment_id_template"]),
+            str(item["enabled"]),
+        ]
+        for item in rows
+    ]
+    click.echo(
+        _render_table(
+            ["model_name", "provider_model", "mode", "deployment_id_template", "enabled"],
+            table_rows,
+        )
+    )
+
+
+@model_group.command(name="rm")
+@click.argument("model_name")
+@click.option(
+    "--inventory",
+    "config_path",
+    default=None,
+    show_default=DEFAULT_CONFIG_HELP,
+    help="ChatGPT inventory file containing models.",
+)
+def model_rm(model_name: str, config_path: str) -> None:
+    """Remove a named model from inventory."""
+    resolved_config = _resolve_config_path(config_path)
+
+    def _updater(models: Dict[str, Any]) -> None:
+        if model_name not in models:
+            raise click.ClickException(f"Model '{model_name}' not found in models")
+        del models[model_name]
+
+    _update_models_in_config(resolved_config, _updater)
+    click.echo(f"removed model:    {model_name}")
+    click.echo(f"inventory:        {resolved_config}")
+    click.echo(_render_note())
+
+
+@model_group.command(name="enable")
+@click.argument("model_name")
+@click.option(
+    "--inventory",
+    "config_path",
+    default=None,
+    show_default=DEFAULT_CONFIG_HELP,
+    help="ChatGPT inventory file containing models.",
+)
+def model_enable(model_name: str, config_path: str) -> None:
+    """Enable a named model in inventory."""
+    resolved_config = _resolve_config_path(config_path)
+
+    def _updater(models: Dict[str, Any]) -> None:
+        if model_name not in models:
+            raise click.ClickException(f"Model '{model_name}' not found in models")
+        entry = models.get(model_name)
+        model_entry = dict(entry) if isinstance(entry, dict) else {}
+        model_entry["enabled"] = True
+        models[model_name] = model_entry
+
+    _, models = _update_models_in_config(resolved_config, _updater)
+    click.echo(f"enabled model:    {model_name}")
+    click.echo(f"inventory:        {resolved_config}")
+    click.echo(f"enabled:          {bool(models[model_name].get('enabled', True))}")
+    click.echo(_render_note())
+
+
+@model_group.command(name="disable")
+@click.argument("model_name")
+@click.option(
+    "--inventory",
+    "config_path",
+    default=None,
+    show_default=DEFAULT_CONFIG_HELP,
+    help="ChatGPT inventory file containing models.",
+)
+def model_disable(model_name: str, config_path: str) -> None:
+    """Disable a named model in inventory."""
+    resolved_config = _resolve_config_path(config_path)
+
+    def _updater(models: Dict[str, Any]) -> None:
+        if model_name not in models:
+            raise click.ClickException(f"Model '{model_name}' not found in models")
+        entry = models.get(model_name)
+        model_entry = dict(entry) if isinstance(entry, dict) else {}
+        model_entry["enabled"] = False
+        models[model_name] = model_entry
+
+    _, models = _update_models_in_config(resolved_config, _updater)
+    click.echo(f"disabled model:   {model_name}")
+    click.echo(f"inventory:        {resolved_config}")
+    click.echo(f"enabled:          {bool(models[model_name].get('enabled', True))}")
+    click.echo(_render_note())
+
+
+@cli.command(name="render")
+@click.option(
+    "--inventory",
+    "config_path",
+    default=None,
+    show_default=DEFAULT_CONFIG_HELP,
+    help="ChatGPT inventory file containing profiles and models.",
+)
+@click.option(
+    "--out",
+    "out_path",
+    required=True,
+    help="Path to LiteLLM runtime config file to update in place.",
+)
+def render_inventory(config_path: str, out_path: str) -> None:
+    """Render managed runtime config keys from inventory."""
+    resolved_config = _resolve_config_path(config_path)
+    resolved_out = Path(out_path).expanduser().resolve()
+    try:
+        inventory = load_inventory(resolved_config)
+        rendered = render_config(inventory)
+        update_rendered_config_file(resolved_out, rendered)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo(f"rendered managed keys in {resolved_out} from {resolved_config}")
+    click.echo(
+        f"profiles={len(rendered.get('chatgpt_auth_profiles', {}))} model_entries={len(rendered.get('model_list', []))}"
+    )
+
+
+@cli.command(name="doctor")
+@click.option(
+    "--inventory",
+    "config_path",
+    default=None,
+    show_default=DEFAULT_CONFIG_HELP,
+    help="ChatGPT inventory file containing profiles and models.",
+)
+@click.option(
+    "--chatgpt-dir",
+    required=True,
+    help="Path to the chatgpt auth directory to verify against inventory.",
+)
+def doctor(config_path: str, chatgpt_dir: str) -> None:
+    """Check inventory drift against chatgpt auth directories."""
+    resolved_config = _resolve_config_path(config_path)
+    resolved_chatgpt_dir = Path(chatgpt_dir).expanduser().resolve()
+    try:
+        inventory = load_inventory(resolved_config)
+        rendered = render_config(inventory)
+        report = doctor_inventory(
+            inventory,
+            chatgpt_dir=resolved_chatgpt_dir,
+            rendered_config=rendered,
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo(report_as_text(report))
 
 
 @cli.command(name="login")

@@ -688,3 +688,151 @@ def test_chatgpt_profile_ls_reads_inventory_and_emits_json(tmp_path: Path) -> No
     assert payload[1]["profile"] == "buy2"
     assert payload[1]["enabled"] is False
     assert payload[1]["weight"] == 3
+
+
+def test_chatgpt_profile_enable_disable_and_set_weight_updates_inventory(tmp_path: Path) -> None:
+    inventory_path = tmp_path / "inventory.yaml"
+    inventory_path.write_text(
+        "profiles:\n"
+        "  buy8:\n"
+        "    token_dir: /tmp/buy8\n"
+        "    enabled: false\n"
+        "    weight: 1\n"
+        "models: {}\n"
+    )
+
+    runner = CliRunner()
+    enable_result = runner.invoke(
+        cli, ["profile", "enable", "buy8", "--inventory", str(inventory_path)]
+    )
+    weight_result = runner.invoke(
+        cli,
+        ["profile", "set-weight", "buy8", "7", "--inventory", str(inventory_path)],
+    )
+    disable_result = runner.invoke(
+        cli, ["profile", "disable", "buy8", "--inventory", str(inventory_path)]
+    )
+
+    payload = inventory_path.read_text()
+    assert enable_result.exit_code == 0
+    assert weight_result.exit_code == 0
+    assert disable_result.exit_code == 0
+    assert "enabled: false" in payload
+    assert "weight: 7" in payload
+
+
+def test_chatgpt_model_add_disable_and_list_json(tmp_path: Path) -> None:
+    inventory_path = tmp_path / "inventory.yaml"
+    inventory_path.write_text("profiles: {}\nmodels: {}\n")
+
+    runner = CliRunner()
+    add_result = runner.invoke(
+        cli,
+        [
+            "model",
+            "add",
+            "chatgpt-4o",
+            "--inventory",
+            str(inventory_path),
+            "--provider-model",
+            "chatgpt/openai",
+            "--mode",
+            "responses",
+            "--deployment-id-template",
+            "chatgpt-{profile}-4o",
+        ],
+    )
+    disable_result = runner.invoke(
+        cli,
+        ["model", "disable", "chatgpt-4o", "--inventory", str(inventory_path)],
+    )
+    list_result = runner.invoke(
+        cli, ["model", "ls", "--inventory", str(inventory_path), "--json"]
+    )
+
+    assert add_result.exit_code == 0
+    assert disable_result.exit_code == 0
+    assert list_result.exit_code == 0
+    payload = json.loads(list_result.output)
+    assert payload[0]["model_name"] == "chatgpt-4o"
+    assert payload[0]["provider_model"] == "chatgpt/openai"
+    assert payload[0]["deployment_id_template"] == "chatgpt-{profile}-4o"
+    assert payload[0]["enabled"] is False
+
+
+def test_chatgpt_render_updates_runtime_config_from_inventory(tmp_path: Path) -> None:
+    inventory_path = tmp_path / "inventory.yaml"
+    inventory_path.write_text(
+        "profiles:\n"
+        "  buy1:\n"
+        f"    token_dir: {(tmp_path / 'chatgpt' / 'buy1').resolve()}\n"
+        "    enabled: true\n"
+        "    weight: 4\n"
+        "models:\n"
+        "  chatgpt-auto:\n"
+        "    provider_model: chatgpt/openai\n"
+        "    mode: responses\n"
+        "    deployment_id_template: chatgpt-{profile}-auto\n"
+    )
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "# top-level comment\n"
+        "router_settings:\n"
+        "  routing_strategy: simple-shuffle\n"
+        "# managed comment\n"
+        "chatgpt_auth_profiles: {}\n"
+        "model_list: []\n"
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "render",
+            "--inventory",
+            str(inventory_path),
+            "--out",
+            str(config_path),
+        ],
+    )
+
+    payload = config_path.read_text()
+    assert result.exit_code == 0
+    assert "# top-level comment" in payload
+    assert "routing_strategy: simple-shuffle" in payload
+    assert "buy1:" in payload
+    assert "chatgpt_auth_profile: buy1" in payload
+    assert "chatgpt-buy1-auto" in payload
+
+
+def test_chatgpt_doctor_reports_inventory_drift(tmp_path: Path) -> None:
+    inventory_path = tmp_path / "inventory.yaml"
+    chatgpt_dir = tmp_path / "chatgpt"
+    chatgpt_dir.mkdir()
+    (chatgpt_dir / "buy2").mkdir()
+    (chatgpt_dir / "stray").mkdir()
+    inventory_path.write_text(
+        "profiles:\n"
+        f"  buy1:\n    token_dir: {(chatgpt_dir / 'buy1').resolve()}\n    enabled: true\n"
+        f"  buy2:\n    token_dir: {(chatgpt_dir / 'buy2').resolve()}\n    enabled: false\n"
+        "models: {}\n"
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "doctor",
+            "--inventory",
+            str(inventory_path),
+            "--chatgpt-dir",
+            str(chatgpt_dir),
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["active_profiles"] == ["buy1"]
+    assert payload["missing_auth_dirs"] == ["buy1"]
+    assert payload["disabled_profiles_with_auth"] == ["buy2"]
+    assert payload["unmanaged_auth_dirs"] == ["stray"]
