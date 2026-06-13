@@ -9,6 +9,7 @@ from datetime import datetime
 from io import StringIO
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from uuid import uuid4
 
 import click
 
@@ -25,10 +26,19 @@ from .inventory_tools import (
 )
 
 ChatGPTUsageMetrics = usage_service.ChatGPTUsageMetrics
+ChatGPTRateLimitResetCreditsMetrics = usage_service.ChatGPTRateLimitResetCreditsMetrics
+RateLimitResetCreditsResult = usage_service.RateLimitResetCreditsResult
 UsageResult = usage_service.UsageResult
 UsageWindow = usage_service.UsageWindow
 _fetch_usage_for_profile = usage_service.fetch_usage_for_profile
+_fetch_rate_limit_reset_credits_for_profile = (
+    usage_service.fetch_rate_limit_reset_credits_for_profile
+)
+_consume_rate_limit_reset_credit_for_profile = (
+    usage_service.consume_rate_limit_reset_credit_for_profile
+)
 _get_usage_url = usage_service.get_usage_url
+_get_rate_limit_reset_credits_url = usage_service.get_rate_limit_reset_credits_url
 _normalize_usage_payload = usage_service.normalize_usage_payload
 
 DEFAULT_CONFIG_ENV_VAR = "CHATGPT_INVENTORY_PATH"
@@ -400,11 +410,80 @@ def _render_usage_report(results: List[UsageResult]) -> str:
     )
 
 
+def _summarize_reset_credit(credit: Dict[str, Any]) -> str:
+    for key in ("credit_id", "id", "name", "title"):
+        value = credit.get(key)
+        if value not in (None, ""):
+            return f"{key}={value}"
+
+    parts: List[str] = []
+    for key in ("available", "status", "remaining_count", "redeem_request_id", "code"):
+        value = credit.get(key)
+        if value not in (None, ""):
+            parts.append(f"{key}={value}")
+
+    if parts:
+        return ", ".join(parts)
+    return json.dumps(credit, sort_keys=True, default=str)
+
+
+def _render_rate_limit_reset_report(results: List[RateLimitResetCreditsResult]) -> str:
+    summary_rows = [
+        [
+            item.profile,
+            str(item.available_count) if item.status == "ok" and item.available_count is not None else "-",
+            str(len(item.credits)) if item.status == "ok" else "-",
+            item.status,
+        ]
+        for item in results
+    ]
+
+    credit_rows: List[List[str]] = []
+    for item in results:
+        if item.status != "ok":
+            credit_rows.append([item.profile, item.error or "unknown error"])
+            continue
+        if not item.credits:
+            credit_rows.append([item.profile, "-"])
+            continue
+        for index, credit in enumerate(item.credits):
+            credit_rows.append(
+                [
+                    item.profile if index == 0 else "",
+                    _summarize_reset_credit(credit),
+                ]
+            )
+
+    return "\n\n".join(
+        [
+            _render_table(
+                ["profile", "available", "credits", "status"],
+                summary_rows,
+            ),
+            _render_table(["profile", "credit"], credit_rows),
+        ]
+    )
+
+
 def _refresh_usage_metrics(
     config_path: Path, usage_url: str, metrics: ChatGPTUsageMetrics
 ) -> List[UsageResult]:
     profiles = _prepare_profiles(config_path, enabled_only=True)
     results = [_fetch_usage_for_profile(name, usage_url) for name in sorted(profiles.keys())]
+    metrics.update(results)
+    return results
+
+
+def _refresh_rate_limit_reset_metrics(
+    config_path: Path,
+    reset_credits_url: str,
+    metrics: ChatGPTRateLimitResetCreditsMetrics,
+) -> List[RateLimitResetCreditsResult]:
+    profiles = _prepare_profiles(config_path, enabled_only=True)
+    results = [
+        _fetch_rate_limit_reset_credits_for_profile(name, reset_credits_url)
+        for name in sorted(profiles.keys())
+    ]
     metrics.update(results)
     return results
 
@@ -1070,6 +1149,107 @@ def usage(profile: Optional[str], config_path: str, json_output: bool) -> None:
     click.echo(_render_usage_report(results))
 
 
+@cli.group(name="reset")
+def reset_group() -> None:
+    """Query and consume ChatGPT rate-limit reset credits."""
+
+
+@reset_group.command(name="ls")
+@click.argument("profile", required=False)
+@click.option(
+    "--inventory",
+    "config_path",
+    default=None,
+    show_default=DEFAULT_CONFIG_HELP,
+    help="ChatGPT inventory file containing profiles.",
+)
+@click.option(
+    "--json",
+    "json_output",
+    is_flag=True,
+    help="Emit reset credits data as JSON instead of a table.",
+)
+def reset_ls(profile: Optional[str], config_path: str, json_output: bool) -> None:
+    """Query available rate-limit reset credits for one or all configured profiles."""
+    resolved_config = _resolve_config_path(config_path)
+    if profile:
+        profiles = _prepare_profiles(resolved_config)
+        if profile not in profiles:
+            raise click.ClickException(f"Profile {profile!r} not found in inventory")
+        profile_names = [profile]
+    else:
+        profiles = _prepare_profiles(resolved_config, enabled_only=True)
+        profile_names = sorted(profiles.keys())
+
+    results = [
+        _fetch_rate_limit_reset_credits_for_profile(
+            name, _get_rate_limit_reset_credits_url()
+        )
+        for name in profile_names
+    ]
+    if json_output:
+        click.echo(json.dumps([asdict(item) for item in results], indent=2))
+        return
+
+    click.echo(_render_rate_limit_reset_report(results))
+
+
+@reset_group.command(name="consume")
+@click.argument("profile")
+@click.argument("credit_id")
+@click.option(
+    "--inventory",
+    "config_path",
+    default=None,
+    show_default=DEFAULT_CONFIG_HELP,
+    help="ChatGPT inventory file containing profiles.",
+)
+@click.option(
+    "--redeem-request-id",
+    help="Optional request identifier. Defaults to a new UUID if omitted.",
+)
+@click.option(
+    "--json",
+    "json_output",
+    is_flag=True,
+    help="Emit the reset consume response as JSON instead of a table.",
+)
+def reset_consume(
+    profile: str,
+    credit_id: str,
+    config_path: str,
+    redeem_request_id: Optional[str],
+    json_output: bool,
+) -> None:
+    """Consume a ChatGPT rate-limit reset credit."""
+    resolved_config = _resolve_config_path(config_path)
+    profiles = _prepare_profiles(resolved_config)
+    if profile not in profiles:
+        raise click.ClickException(f"Profile {profile!r} not found in inventory")
+
+    request_id = redeem_request_id or str(uuid4())
+    result = _consume_rate_limit_reset_credit_for_profile(
+        profile,
+        credit_id,
+        request_id,
+        _get_rate_limit_reset_credits_url(),
+    )
+
+    if json_output:
+        click.echo(json.dumps(asdict(result), indent=2))
+    else:
+        click.echo(f"profile:          {profile}")
+        click.echo(f"credit_id:        {credit_id}")
+        click.echo(f"redeem_request_id: {request_id}")
+        click.echo(f"status:           {result.status}")
+        if result.code:
+            click.echo(f"code:             {result.code}")
+        click.echo(_render_rate_limit_reset_report([result]))
+
+    if result.status != "ok":
+        raise click.ClickException(result.error or f"Failed to consume reset credit {credit_id!r}")
+
+
 @cli.command(name="metrics")
 @click.option(
     "--inventory",
@@ -1096,15 +1276,16 @@ def usage(profile: Optional[str], config_path: str, json_output: bool) -> None:
     default=DEFAULT_METRICS_INTERVAL_SECONDS,
     show_default=True,
     type=int,
-    help="Refresh interval for ChatGPT usage polling.",
+    help="Refresh interval for ChatGPT usage and reset polling.",
 )
 def metrics(config_path: Optional[str], listen_host: str, port: int, interval_seconds: int) -> None:
-    """Serve Prometheus metrics for ChatGPT account usage windows."""
+    """Serve Prometheus metrics for ChatGPT account usage and reset credits."""
     if interval_seconds <= 0:
         raise click.ClickException("--interval-seconds must be greater than 0")
 
     resolved_config = _resolve_config_path(config_path)
     usage_url = _get_usage_url()
+    reset_credits_url = usage_service.get_rate_limit_reset_credits_url()
 
     try:
         from prometheus_client import CollectorRegistry, start_http_server
@@ -1115,24 +1296,39 @@ def metrics(config_path: Optional[str], listen_host: str, port: int, interval_se
 
     registry = CollectorRegistry()
     usage_metrics = ChatGPTUsageMetrics(registry=registry)
+    reset_credits_metrics = ChatGPTRateLimitResetCreditsMetrics(registry=registry)
 
     results = _refresh_usage_metrics(resolved_config, usage_url, usage_metrics)
+    reset_results = _refresh_rate_limit_reset_metrics(
+        resolved_config,
+        reset_credits_url,
+        reset_credits_metrics,
+    )
     start_http_server(port, addr=listen_host, registry=registry)
     click.echo(
-        f"serving ChatGPT usage metrics on http://{listen_host}:{port}/metrics "
-        f"for {len(results)} profile(s); refresh interval {interval_seconds}s"
+        f"serving ChatGPT usage and reset metrics on http://{listen_host}:{port}/metrics "
+        f"for {len(results)} profile(s); reset profiles {len(reset_results)}; refresh interval {interval_seconds}s"
     )
 
     while True:
         try:
             time.sleep(interval_seconds)
             _refresh_usage_metrics(resolved_config, usage_url, usage_metrics)
+            _refresh_rate_limit_reset_metrics(
+                resolved_config,
+                reset_credits_url,
+                reset_credits_metrics,
+            )
         except KeyboardInterrupt:
-            click.echo("stopping ChatGPT usage metrics exporter")
+            click.echo("stopping ChatGPT usage and reset metrics exporter")
             return
         except Exception as exc:
             usage_metrics.mark_refresh_failure()
-            click.echo(f"warning: failed refreshing ChatGPT usage metrics: {exc}", err=True)
+            reset_credits_metrics.mark_refresh_failure()
+            click.echo(
+                f"warning: failed refreshing ChatGPT usage and reset metrics: {exc}",
+                err=True,
+            )
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+from uuid import UUID
 
 from click.testing import CliRunner
 import pytest
@@ -11,6 +12,8 @@ from prometheus_client import CollectorRegistry, generate_latest
 from litellm.llms.chatgpt.authenticator import BrowserLoginSession
 from litellm.llms.chatgpt.login_cli import (
     ChatGPTUsageMetrics,
+    ChatGPTRateLimitResetCreditsMetrics,
+    RateLimitResetCreditsResult,
     UsageResult,
     UsageWindow,
     _normalize_usage_payload,
@@ -272,6 +275,87 @@ def test_chatgpt_usage_cli_can_emit_json(tmp_path: Path) -> None:
     assert payload[0]["plan"] == "plus"
 
 
+def test_chatgpt_reset_cli_can_emit_json(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "profiles:\n  buy2:\n    token_dir: /tmp/buy2\n"
+    )
+
+    runner = CliRunner()
+    with patch(
+        "litellm.llms.chatgpt.login_cli._fetch_rate_limit_reset_credits_for_profile",
+        return_value=RateLimitResetCreditsResult(
+            profile="buy2",
+            account_id="acct-buy2-1234",
+            available_count=1,
+            credits=[
+                {
+                    "credit_id": "credit-123",
+                    "title": "Weekly reset",
+                    "available": True,
+                }
+            ],
+            status="ok",
+        ),
+    ):
+        result = runner.invoke(
+            cli,
+            ["reset", "ls", "buy2", "--inventory", str(config_path), "--json"],
+        )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload[0]["profile"] == "buy2"
+    assert payload[0]["available_count"] == 1
+    assert payload[0]["credits"][0]["credit_id"] == "credit-123"
+
+
+def test_chatgpt_reset_consume_cli_posts_reset_request(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "profiles:\n  buy2:\n    token_dir: /tmp/buy2\n"
+    )
+
+    runner = CliRunner()
+    with patch(
+        "litellm.llms.chatgpt.login_cli._consume_rate_limit_reset_credit_for_profile",
+        return_value=RateLimitResetCreditsResult(
+            profile="buy2",
+            account_id="acct-buy2-1234",
+            available_count=0,
+            credits=[],
+            status="ok",
+            code="reset",
+        ),
+    ) as mock_consume, patch(
+        "litellm.llms.chatgpt.login_cli._get_rate_limit_reset_credits_url",
+        return_value="https://chatgpt.com/backend-api/wham/rate-limit-reset-credits",
+    ), patch(
+        "litellm.llms.chatgpt.login_cli.uuid4",
+        return_value=UUID("12345678-1234-5678-1234-567812345678"),
+    ):
+        result = runner.invoke(
+            cli,
+            [
+                "reset",
+                "consume",
+                "buy2",
+                "credit-123",
+                "--inventory",
+                str(config_path),
+            ],
+        )
+
+    assert result.exit_code == 0
+    assert "credit_id:" in result.output
+    mock_consume.assert_called_once_with(
+        "buy2",
+        "credit-123",
+        "12345678-1234-5678-1234-567812345678",
+        "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits",
+    )
+
+
 def test_chatgpt_usage_cli_uses_config_file_path_env_var(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
@@ -397,6 +481,74 @@ def test_chatgpt_usage_metrics_exporter_updates_prometheus_gauges() -> None:
     )
     assert (
         'litellm_chatgpt_usage_window_remaining_seconds{profile="buy2",window="1w"} 600000.0'
+        in payload
+    )
+
+
+def test_chatgpt_reset_metrics_exporter_updates_prometheus_gauges() -> None:
+    registry = CollectorRegistry()
+    metrics = ChatGPTRateLimitResetCreditsMetrics(registry=registry)
+    metrics.update(
+        [
+            RateLimitResetCreditsResult(
+                profile="buy2",
+                account_id="acct-buy2-1234",
+                available_count=1,
+                credits=[
+                    {
+                        "credit_id": "credit-123",
+                        "title": "Weekly reset",
+                    }
+                ],
+                status="ok",
+            )
+        ],
+        refreshed_at=1700000000,
+    )
+
+    payload = generate_latest(registry).decode("utf-8")
+    assert 'litellm_chatgpt_rate_limit_reset_profile_up{profile="buy2"} 1.0' in payload
+    assert (
+        'litellm_chatgpt_rate_limit_reset_available_count{profile="buy2"} 1.0'
+        in payload
+    )
+    assert (
+        'litellm_chatgpt_rate_limit_reset_credit_count{profile="buy2"} 1.0'
+        in payload
+    )
+
+
+def test_chatgpt_reset_metrics_exporter_keeps_credit_count_on_business_error() -> None:
+    registry = CollectorRegistry()
+    metrics = ChatGPTRateLimitResetCreditsMetrics(registry=registry)
+    metrics.update(
+        [
+            RateLimitResetCreditsResult(
+                profile="buy2",
+                account_id="acct-buy2-1234",
+                available_count=0,
+                credits=[
+                    {
+                        "credit_id": "credit-123",
+                        "title": "Weekly reset",
+                    }
+                ],
+                status="error",
+                code="already_redeemed",
+                error="This reset credit has already been redeemed.",
+            )
+        ],
+        refreshed_at=1700000000,
+    )
+
+    payload = generate_latest(registry).decode("utf-8")
+    assert 'litellm_chatgpt_rate_limit_reset_profile_up{profile="buy2"} 0.0' in payload
+    assert (
+        'litellm_chatgpt_rate_limit_reset_available_count{profile="buy2"} 0.0'
+        in payload
+    )
+    assert (
+        'litellm_chatgpt_rate_limit_reset_credit_count{profile="buy2"} 1.0'
         in payload
     )
 

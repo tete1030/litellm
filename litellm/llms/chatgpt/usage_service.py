@@ -9,12 +9,16 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import litellm
 from litellm._logging import verbose_router_logger
+from litellm.llms.base_llm.chat.transformation import BaseLLMException
 from litellm.llms.custom_httpx.http_handler import _get_httpx_client
 
 from .authenticator import get_chatgpt_authenticator
 from .common_utils import ChatGPTAuthError
 
 DEFAULT_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
+DEFAULT_RATE_LIMIT_RESET_CREDITS_URL = (
+    "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
+)
 DEFAULT_ACCOUNTS_CHECK_URL = "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27"
 
 
@@ -60,6 +64,19 @@ class ChatGPTPacingInfo:
     effective_deadline_at: Optional[int]
     time_ratio: Optional[float]
     pace_ratio: Optional[float]
+
+
+@dataclass
+class RateLimitResetCreditsResult:
+    profile: str
+    account_id: str
+    available_count: Optional[int]
+    credits: List[Dict[str, Any]]
+    status: str
+    error: Optional[str] = None
+    code: Optional[str] = None
+    message: Optional[str] = None
+    raw_payload: Optional[Dict[str, Any]] = None
 
 
 class ChatGPTUsageMetrics:
@@ -273,11 +290,110 @@ class ChatGPTUsageMetrics:
         self.refresh_success.set(0)
 
 
+class ChatGPTRateLimitResetCreditsMetrics:
+    def __init__(self, registry: Any) -> None:
+        from prometheus_client import Gauge
+
+        self.refresh_success = Gauge(
+            "litellm_chatgpt_rate_limit_reset_refresh_success",
+            "Whether the last rate-limit reset credits refresh completed successfully.",
+            registry=registry,
+        )
+        self.refresh_timestamp = Gauge(
+            "litellm_chatgpt_rate_limit_reset_refresh_timestamp_seconds",
+            "Unix timestamp of the last rate-limit reset credits refresh attempt.",
+            registry=registry,
+        )
+        self.profile_up = Gauge(
+            "litellm_chatgpt_rate_limit_reset_profile_up",
+            "Whether reset credit data was fetched successfully for the profile.",
+            labelnames=["profile"],
+            registry=registry,
+        )
+        self.profile_available_count = Gauge(
+            "litellm_chatgpt_rate_limit_reset_available_count",
+            "Number of ChatGPT rate-limit reset credits available for the profile.",
+            labelnames=["profile"],
+            registry=registry,
+        )
+        self.profile_credit_count = Gauge(
+            "litellm_chatgpt_rate_limit_reset_credit_count",
+            "Number of reset credit entries returned for the profile.",
+            labelnames=["profile"],
+            registry=registry,
+        )
+        self._known_profiles: set[str] = set()
+
+    def update(
+        self,
+        results: List[RateLimitResetCreditsResult],
+        refreshed_at: Optional[float] = None,
+    ) -> None:
+        refreshed_at = refreshed_at or time.time()
+        self.refresh_timestamp.set(refreshed_at)
+        self.refresh_success.set(1)
+
+        active_profiles: set[str] = set()
+        for result in results:
+            profile = result.profile
+            active_profiles.add(profile)
+            self.profile_up.labels(profile=profile).set(1 if result.status == "ok" else 0)
+            self.profile_available_count.labels(profile=profile).set(
+                result.available_count
+                if result.available_count is not None
+                else float("nan")
+            )
+            self.profile_credit_count.labels(profile=profile).set(len(result.credits))
+
+        for profile in self._known_profiles - active_profiles:
+            self.profile_up.remove(profile)
+            self.profile_available_count.remove(profile)
+            self.profile_credit_count.remove(profile)
+
+        self._known_profiles = active_profiles
+
+    def mark_refresh_failure(self, refreshed_at: Optional[float] = None) -> None:
+        self.refresh_timestamp.set(refreshed_at or time.time())
+        self.refresh_success.set(0)
+
+
+class ChatGPTCodexRateLimitError(BaseLLMException):
+    def __init__(
+        self,
+        *,
+        message: str,
+        error_type: str,
+        headers: Optional[Dict[str, str]] = None,
+        error_extra_fields: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        super().__init__(status_code=429, message=message, headers=headers)
+        self.type = error_type
+        self.param = None
+        self.error_extra_fields = error_extra_fields or {}
+
+
+_CODEX_RATE_LIMIT_REACHED_TYPES = {
+    "rate_limit_reached",
+    "workspace_owner_credits_depleted",
+    "workspace_member_credits_depleted",
+    "workspace_owner_usage_limit_reached",
+    "workspace_member_usage_limit_reached",
+}
+
+
 def get_usage_url() -> str:
     return str(
         litellm.get_secret("LITELLM_CHATGPT_USAGE_URL")
         or litellm.get_secret("CHATGPT_USAGE_URL")
         or DEFAULT_USAGE_URL
+    )
+
+
+def get_rate_limit_reset_credits_url() -> str:
+    return str(
+        litellm.get_secret("LITELLM_CHATGPT_RATE_LIMIT_RESET_CREDITS_URL")
+        or litellm.get_secret("CHATGPT_RATE_LIMIT_RESET_CREDITS_URL")
+        or DEFAULT_RATE_LIMIT_RESET_CREDITS_URL
     )
 
 
@@ -325,6 +441,13 @@ def _sanitize_account_type(value: Any) -> str:
         return "unknown"
     normalized = str(value).strip().lower()
     return normalized if normalized else "unknown"
+
+
+def _normalize_codex_rate_limit_reached_type(value: Optional[str]) -> str:
+    normalized = _sanitize_account_type(value)
+    if normalized in _CODEX_RATE_LIMIT_REACHED_TYPES:
+        return normalized
+    return "rate_limit_reached"
 
 
 def _optional_bool_to_gauge_value(value: Optional[bool]) -> float:
@@ -417,6 +540,80 @@ def get_effective_deadline_at(
     if not deadline_candidates:
         return None
     return min(deadline_candidates)
+
+
+def _get_codex_limit_metadata(
+    result: UsageResult,
+) -> Tuple[str, str, Optional[UsageWindow]]:
+    weekly_window = get_weekly_pacing_window(result)
+    if weekly_window is None:
+        return "codex", "codex", None
+
+    if weekly_window.label == "1w" or weekly_window.limit_seconds == 604800:
+        return "weekly-limit", "weekly", weekly_window
+    if weekly_window.label == "5h" or weekly_window.limit_seconds == 18000:
+        return "five-hour-limit", "5-hour", weekly_window
+    return "codex", weekly_window.label or "codex", weekly_window
+
+
+def build_codex_rate_limit_headers(result: UsageResult) -> Dict[str, str]:
+    active_limit, limit_name, primary_window = _get_codex_limit_metadata(result)
+    headers: Dict[str, str] = {
+        "x-codex-active-limit": active_limit,
+        "x-codex-rate-limit-reached-type": _normalize_codex_rate_limit_reached_type(
+            result.rate_limit_reached_type
+        ),
+    }
+
+    if limit_name:
+        headers[f"x-{active_limit}-limit-name"] = str(limit_name)
+
+    if primary_window is not None:
+        headers[f"x-{active_limit}-primary-used-percent"] = str(
+            int(round(primary_window.used_percent))
+        )
+        if primary_window.limit_seconds is not None:
+            headers[f"x-{active_limit}-primary-window-minutes"] = str(
+                int(primary_window.limit_seconds // 60)
+            )
+        if primary_window.reset_at is not None:
+            headers[f"x-{active_limit}-primary-reset-at"] = str(primary_window.reset_at)
+
+    if result.credits_balance is not None:
+        headers["x-codex-credits-balance"] = str(result.credits_balance)
+
+    return headers
+
+
+def build_codex_rate_limit_error(
+    profile: str,
+    result: UsageResult,
+) -> ChatGPTCodexRateLimitError:
+    _, _, weekly_window = _get_codex_limit_metadata(result)
+    plan_type = _sanitize_account_type(result.account_type or result.plan)
+    resets_at = (
+        weekly_window.reset_at
+        if weekly_window is not None and weekly_window.reset_at is not None
+        else get_effective_deadline_at(result, weekly_window)
+    )
+
+    if plan_type == "free" or result.has_active_subscription is False:
+        return ChatGPTCodexRateLimitError(
+            message=f"ChatGPT usage is not included for profile '{profile}'.",
+            error_type="usage_not_included",
+            error_extra_fields={"plan_type": plan_type},
+        )
+
+    error_extra_fields: Dict[str, Any] = {"plan_type": plan_type}
+    if resets_at is not None:
+        error_extra_fields["resets_at"] = int(resets_at)
+
+    return ChatGPTCodexRateLimitError(
+        message=f"ChatGPT usage limit reached for profile '{profile}'.",
+        error_type="usage_limit_reached",
+        headers=build_codex_rate_limit_headers(result),
+        error_extra_fields=error_extra_fields,
+    )
 
 
 def compute_chatgpt_pacing_info(
@@ -592,6 +789,24 @@ def _get_usage_access_token(authenticator: Any, auth_data: Dict[str, Any]) -> st
     )
 
 
+def _build_chatgpt_api_headers(
+    access_token: str,
+    account_id: str,
+    *,
+    content_type_json: bool = False,
+) -> Dict[str, str]:
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "User-Agent": "litellm-chatgpt",
+        "Accept": "application/json",
+    }
+    if account_id:
+        headers["ChatGPT-Account-Id"] = account_id
+    if content_type_json:
+        headers["Content-Type"] = "application/json"
+    return headers
+
+
 def _normalize_usage_window(label: str, window_payload: Dict[str, Any]) -> UsageWindow:
     reset_at = _parse_optional_int(window_payload.get("reset_at"))
     limit_seconds = _parse_optional_int(window_payload.get("limit_window_seconds"))
@@ -686,6 +901,48 @@ def normalize_usage_payload(
     return result
 
 
+def _normalize_rate_limit_reset_credits_payload(
+    profile: str,
+    account_id: str,
+    payload: Dict[str, Any],
+) -> RateLimitResetCreditsResult:
+    available_count = _parse_optional_int(payload.get("available_count"))
+    credits_payload = payload.get("credits")
+    credits: List[Dict[str, Any]] = []
+    if isinstance(credits_payload, list):
+        credits = [credit for credit in credits_payload if isinstance(credit, dict)]
+    elif isinstance(credits_payload, dict):
+        credits = [credits_payload]
+
+    code = payload.get("code")
+    if code is not None and not isinstance(code, str):
+        code = str(code)
+
+    message = payload.get("message")
+    if message is None and isinstance(payload.get("detail"), str):
+        message = payload.get("detail")
+    if message is not None and not isinstance(message, str):
+        message = str(message)
+
+    status = "ok"
+    error = None
+    if code not in (None, "", "reset"):
+        status = "error"
+        error = message or f"reset credits returned code {code}"
+
+    return RateLimitResetCreditsResult(
+        profile=profile,
+        account_id=account_id,
+        available_count=available_count,
+        credits=credits,
+        status=status,
+        error=error,
+        code=code,
+        message=message,
+        raw_payload=payload,
+    )
+
+
 def _fetch_account_metadata(
     client: Any,
     access_token: str,
@@ -694,12 +951,7 @@ def _fetch_account_metadata(
 ) -> Tuple[Optional[str], Optional[bool], Optional[int], Optional[int]]:
     response = client.get(
         accounts_check_url or get_accounts_check_url(),
-        headers={
-            "Authorization": f"Bearer {access_token}",
-            "User-Agent": "litellm-chatgpt",
-            "Accept": "application/json",
-            **({"ChatGPT-Account-Id": account_id} if account_id else {}),
-        },
+        headers=_build_chatgpt_api_headers(access_token, account_id),
     )
 
     try:
@@ -750,12 +1002,7 @@ def fetch_usage_for_profile(profile: str, usage_url: Optional[str] = None) -> Us
     client = _get_httpx_client()
     response = client.get(
         usage_url or get_usage_url(),
-        headers={
-            "Authorization": f"Bearer {access_token}",
-            "User-Agent": "litellm-chatgpt",
-            "Accept": "application/json",
-            **({"ChatGPT-Account-Id": account_id} if account_id else {}),
-        },
+        headers=_build_chatgpt_api_headers(access_token, account_id),
     )
     try:
         response.raise_for_status()
@@ -795,6 +1042,125 @@ def fetch_usage_for_profile(profile: str, usage_url: Optional[str] = None) -> Us
         has_active_subscription=result.has_active_subscription,
     )
     return result
+
+
+def fetch_rate_limit_reset_credits_for_profile(
+    profile: str,
+    reset_credits_url: Optional[str] = None,
+) -> RateLimitResetCreditsResult:
+    account_id = ""
+    try:
+        authenticator, auth_data = _load_auth_data(profile)
+        account_id = auth_data.get("account_id") or authenticator.get_account_id() or ""
+        access_token = _get_usage_access_token(authenticator, auth_data)
+    except (ChatGPTAuthError, ValueError) as exc:
+        return RateLimitResetCreditsResult(
+            profile=profile,
+            account_id=account_id,
+            available_count=None,
+            credits=[],
+            status="error",
+            error=f"reset credits auth failed: {exc}",
+        )
+
+    client = _get_httpx_client()
+    response = client.get(
+        reset_credits_url or get_rate_limit_reset_credits_url(),
+        headers=_build_chatgpt_api_headers(access_token, account_id),
+    )
+    try:
+        response.raise_for_status()
+    except Exception as exc:
+        body_text = response.text.strip() if response.text else str(exc)
+        return RateLimitResetCreditsResult(
+            profile=profile,
+            account_id=account_id,
+            available_count=None,
+            credits=[],
+            status="error",
+            error=f"reset credits request failed ({response.status_code}): {body_text}",
+        )
+
+    try:
+        payload = response.json()
+    except Exception as exc:
+        return RateLimitResetCreditsResult(
+            profile=profile,
+            account_id=account_id,
+            available_count=None,
+            credits=[],
+            status="error",
+            error=f"reset credits response parse failed: {exc}",
+        )
+
+    if not isinstance(payload, dict):
+        return RateLimitResetCreditsResult(
+            profile=profile,
+            account_id=account_id,
+            available_count=None,
+            credits=[],
+            status="error",
+            error=f"reset credits response must be a JSON object: {payload!r}",
+        )
+
+    return _normalize_rate_limit_reset_credits_payload(profile, account_id, payload)
+
+
+def consume_rate_limit_reset_credit_for_profile(
+    profile: str,
+    credit_id: str,
+    redeem_request_id: str,
+    reset_credits_url: Optional[str] = None,
+) -> RateLimitResetCreditsResult:
+    account_id = ""
+    try:
+        authenticator, auth_data = _load_auth_data(profile)
+        account_id = auth_data.get("account_id") or authenticator.get_account_id() or ""
+        access_token = _get_usage_access_token(authenticator, auth_data)
+    except (ChatGPTAuthError, ValueError) as exc:
+        return RateLimitResetCreditsResult(
+            profile=profile,
+            account_id=account_id,
+            available_count=None,
+            credits=[],
+            status="error",
+            error=f"reset credits auth failed: {exc}",
+        )
+
+    client = _get_httpx_client()
+    endpoint = (
+        (reset_credits_url or get_rate_limit_reset_credits_url()).rstrip("/")
+        + "/consume"
+    )
+    response = client.post(
+        endpoint,
+        headers=_build_chatgpt_api_headers(
+            access_token, account_id, content_type_json=True
+        ),
+        json={"credit_id": credit_id, "redeem_request_id": redeem_request_id},
+    )
+    try:
+        response.raise_for_status()
+    except Exception as exc:
+        body_text = response.text.strip() if response.text else str(exc)
+        return RateLimitResetCreditsResult(
+            profile=profile,
+            account_id=account_id,
+            available_count=None,
+            credits=[],
+            status="error",
+            error=f"reset credits consume failed ({response.status_code}): {body_text}",
+        )
+
+    try:
+        payload = response.json()
+    except Exception:
+        payload = {"raw_text": response.text.strip() if response.text else ""}
+
+    if not isinstance(payload, dict):
+        payload = {"raw_payload": payload}
+
+    return _normalize_rate_limit_reset_credits_payload(profile, account_id, payload)
 
 
 class ChatGPTUsageService:
