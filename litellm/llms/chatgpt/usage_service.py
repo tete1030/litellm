@@ -73,6 +73,7 @@ class RateLimitResetCreditsResult:
     available_count: Optional[int]
     credits: List[Dict[str, Any]]
     status: str
+    next_expires_at: Optional[int] = None
     error: Optional[str] = None
     code: Optional[str] = None
     message: Optional[str] = None
@@ -322,7 +323,20 @@ class ChatGPTRateLimitResetCreditsMetrics:
             labelnames=["profile"],
             registry=registry,
         )
+        self.profile_next_expires_timestamp = Gauge(
+            "litellm_chatgpt_rate_limit_reset_next_expires_timestamp_seconds",
+            "Unix timestamp when the earliest available reset credit expires.",
+            labelnames=["profile"],
+            registry=registry,
+        )
+        self.credit_expires_timestamp = Gauge(
+            "litellm_chatgpt_rate_limit_reset_credit_expires_timestamp_seconds",
+            "Unix timestamp when a reset credit expires.",
+            labelnames=["profile", "credit_id", "status"],
+            registry=registry,
+        )
         self._known_profiles: set[str] = set()
+        self._known_credit_labels: set[tuple[str, str, str]] = set()
 
     def update(
         self,
@@ -334,6 +348,7 @@ class ChatGPTRateLimitResetCreditsMetrics:
         self.refresh_success.set(1)
 
         active_profiles: set[str] = set()
+        active_credit_labels: set[tuple[str, str, str]] = set()
         for result in results:
             profile = result.profile
             active_profiles.add(profile)
@@ -344,13 +359,37 @@ class ChatGPTRateLimitResetCreditsMetrics:
                 else float("nan")
             )
             self.profile_credit_count.labels(profile=profile).set(len(result.credits))
+            self.profile_next_expires_timestamp.labels(profile=profile).set(
+                float(result.next_expires_at)
+                if result.next_expires_at is not None
+                else float("nan")
+            )
+
+            for credit in result.credits:
+                credit_id = get_rate_limit_reset_credit_id(credit)
+                if credit_id is None:
+                    continue
+                status = _sanitize_reset_credit_status(credit.get("status"))
+                label_key = (profile, credit_id, status)
+                active_credit_labels.add(label_key)
+                expires_at = get_rate_limit_reset_credit_expires_at(credit)
+                self.credit_expires_timestamp.labels(
+                    profile=profile,
+                    credit_id=credit_id,
+                    status=status,
+                ).set(float(expires_at) if expires_at is not None else float("nan"))
 
         for profile in self._known_profiles - active_profiles:
             self.profile_up.remove(profile)
             self.profile_available_count.remove(profile)
             self.profile_credit_count.remove(profile)
+            self.profile_next_expires_timestamp.remove(profile)
+
+        for profile, credit_id, status in self._known_credit_labels - active_credit_labels:
+            self.credit_expires_timestamp.remove(profile, credit_id, status)
 
         self._known_profiles = active_profiles
+        self._known_credit_labels = active_credit_labels
 
     def mark_refresh_failure(self, refreshed_at: Optional[float] = None) -> None:
         self.refresh_timestamp.set(refreshed_at or time.time())
@@ -443,6 +482,13 @@ def _sanitize_account_type(value: Any) -> str:
     return normalized if normalized else "unknown"
 
 
+def _sanitize_reset_credit_status(value: Any) -> str:
+    if value is None:
+        return "unknown"
+    normalized = str(value).strip().lower()
+    return normalized if normalized else "unknown"
+
+
 def _normalize_codex_rate_limit_reached_type(value: Optional[str]) -> str:
     normalized = _sanitize_account_type(value)
     if normalized in _CODEX_RATE_LIMIT_REACHED_TYPES:
@@ -497,6 +543,72 @@ def _effective_available_from_result(result: UsageResult) -> bool:
         rate_limit_reached=result.rate_limit_reached,
         has_active_subscription=result.has_active_subscription,
     )
+
+
+def get_rate_limit_reset_credit_id(credit: Dict[str, Any]) -> Optional[str]:
+    for key in ("credit_id", "id"):
+        value = credit.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def get_rate_limit_reset_credit_expires_at(credit: Dict[str, Any]) -> Optional[int]:
+    for key in (
+        "expires_at_timestamp",
+        "expires_at",
+        "expire_at",
+        "expiresAt",
+        "expiration_time",
+    ):
+        expires_at = _parse_optional_timestamp(credit.get(key))
+        if expires_at is not None:
+            return expires_at
+    return None
+
+
+def is_rate_limit_reset_credit_available(credit: Dict[str, Any]) -> bool:
+    if credit.get("available") is False:
+        return False
+    status = _sanitize_reset_credit_status(credit.get("status"))
+    if status not in ("unknown", "available"):
+        return False
+    return get_rate_limit_reset_credit_id(credit) is not None
+
+
+def get_next_rate_limit_reset_credit_expires_at(
+    credits: Sequence[Dict[str, Any]],
+) -> Optional[int]:
+    expires_at_values = [
+        expires_at
+        for credit in credits
+        if is_rate_limit_reset_credit_available(credit)
+        for expires_at in [get_rate_limit_reset_credit_expires_at(credit)]
+        if expires_at is not None
+    ]
+    if not expires_at_values:
+        return None
+    return min(expires_at_values)
+
+
+def select_rate_limit_reset_credit_id(
+    credits: Sequence[Dict[str, Any]],
+) -> Optional[str]:
+    candidates = [
+        credit
+        for credit in credits
+        if isinstance(credit, dict) and is_rate_limit_reset_credit_available(credit)
+    ]
+    if not candidates:
+        return None
+
+    def _sort_key(credit: Dict[str, Any]) -> Tuple[int, int, str]:
+        expires_at = get_rate_limit_reset_credit_expires_at(credit)
+        credit_id = get_rate_limit_reset_credit_id(credit) or ""
+        return (0 if expires_at is not None else 1, expires_at or 0, credit_id)
+
+    selected = min(candidates, key=_sort_key)
+    return get_rate_limit_reset_credit_id(selected)
 
 
 def is_usage_result_expired(
@@ -901,6 +1013,14 @@ def normalize_usage_payload(
     return result
 
 
+def _normalize_rate_limit_reset_credit(credit: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = dict(credit)
+    expires_at = get_rate_limit_reset_credit_expires_at(normalized)
+    if expires_at is not None:
+        normalized["expires_at_timestamp"] = expires_at
+    return normalized
+
+
 def _normalize_rate_limit_reset_credits_payload(
     profile: str,
     account_id: str,
@@ -910,9 +1030,13 @@ def _normalize_rate_limit_reset_credits_payload(
     credits_payload = payload.get("credits")
     credits: List[Dict[str, Any]] = []
     if isinstance(credits_payload, list):
-        credits = [credit for credit in credits_payload if isinstance(credit, dict)]
+        credits = [
+            _normalize_rate_limit_reset_credit(credit)
+            for credit in credits_payload
+            if isinstance(credit, dict)
+        ]
     elif isinstance(credits_payload, dict):
-        credits = [credits_payload]
+        credits = [_normalize_rate_limit_reset_credit(credits_payload)]
 
     code = payload.get("code")
     if code is not None and not isinstance(code, str):
@@ -936,6 +1060,7 @@ def _normalize_rate_limit_reset_credits_payload(
         available_count=available_count,
         credits=credits,
         status=status,
+        next_expires_at=get_next_rate_limit_reset_credit_expires_at(credits),
         error=error,
         code=code,
         message=message,

@@ -40,6 +40,10 @@ _consume_rate_limit_reset_credit_for_profile = (
 _get_usage_url = usage_service.get_usage_url
 _get_rate_limit_reset_credits_url = usage_service.get_rate_limit_reset_credits_url
 _normalize_usage_payload = usage_service.normalize_usage_payload
+_get_rate_limit_reset_credit_expires_at = (
+    usage_service.get_rate_limit_reset_credit_expires_at
+)
+_select_rate_limit_reset_credit_id = usage_service.select_rate_limit_reset_credit_id
 
 DEFAULT_CONFIG_ENV_VAR = "CHATGPT_INVENTORY_PATH"
 DEFAULT_CONFIG_DIR = Path.home() / ".config/litellm"
@@ -411,12 +415,17 @@ def _render_usage_report(results: List[UsageResult]) -> str:
 
 
 def _summarize_reset_credit(credit: Dict[str, Any]) -> str:
+    parts: List[str] = []
     for key in ("credit_id", "id", "name", "title"):
         value = credit.get(key)
         if value not in (None, ""):
-            return f"{key}={value}"
+            parts.append(f"{key}={value}")
+            break
 
-    parts: List[str] = []
+    expires_at = _get_rate_limit_reset_credit_expires_at(credit)
+    if expires_at is not None:
+        parts.append(f"expires_at={_format_reset_local(expires_at)}")
+
     for key in ("available", "status", "remaining_count", "redeem_request_id", "code"):
         value = credit.get(key)
         if value not in (None, ""):
@@ -1196,7 +1205,7 @@ def reset_ls(profile: Optional[str], config_path: str, json_output: bool) -> Non
 
 @reset_group.command(name="consume")
 @click.argument("profile")
-@click.argument("credit_id")
+@click.argument("credit_id", required=False)
 @click.option(
     "--inventory",
     "config_path",
@@ -1214,12 +1223,19 @@ def reset_ls(profile: Optional[str], config_path: str, json_output: bool) -> Non
     is_flag=True,
     help="Emit the reset consume response as JSON instead of a table.",
 )
+@click.option(
+    "--auto",
+    "auto_select",
+    is_flag=True,
+    help="Select the available reset credit with the earliest expires_at timestamp.",
+)
 def reset_consume(
     profile: str,
-    credit_id: str,
+    credit_id: Optional[str],
     config_path: str,
     redeem_request_id: Optional[str],
     json_output: bool,
+    auto_select: bool,
 ) -> None:
     """Consume a ChatGPT rate-limit reset credit."""
     resolved_config = _resolve_config_path(config_path)
@@ -1227,10 +1243,27 @@ def reset_consume(
     if profile not in profiles:
         raise click.ClickException(f"Profile {profile!r} not found in inventory")
 
+    selected_credit_id = credit_id
+    if auto_select or selected_credit_id is None:
+        lookup_result = _fetch_rate_limit_reset_credits_for_profile(
+            profile,
+            _get_rate_limit_reset_credits_url(),
+        )
+        if lookup_result.status != "ok":
+            raise click.ClickException(
+                lookup_result.error
+                or f"Failed to query reset credits for profile {profile!r}"
+            )
+        selected_credit_id = _select_rate_limit_reset_credit_id(lookup_result.credits)
+        if selected_credit_id is None:
+            raise click.ClickException(
+                f"No available reset credit found for profile {profile!r}"
+            )
+
     request_id = redeem_request_id or str(uuid4())
     result = _consume_rate_limit_reset_credit_for_profile(
         profile,
-        credit_id,
+        selected_credit_id,
         request_id,
         _get_rate_limit_reset_credits_url(),
     )
@@ -1239,7 +1272,7 @@ def reset_consume(
         click.echo(json.dumps(asdict(result), indent=2))
     else:
         click.echo(f"profile:          {profile}")
-        click.echo(f"credit_id:        {credit_id}")
+        click.echo(f"credit_id:        {selected_credit_id}")
         click.echo(f"redeem_request_id: {request_id}")
         click.echo(f"status:           {result.status}")
         if result.code:

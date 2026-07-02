@@ -293,6 +293,7 @@ def test_chatgpt_reset_cli_can_emit_json(tmp_path: Path) -> None:
                     "credit_id": "credit-123",
                     "title": "Weekly reset",
                     "available": True,
+                    "expires_at_timestamp": 1783829062,
                 }
             ],
             status="ok",
@@ -308,6 +309,7 @@ def test_chatgpt_reset_cli_can_emit_json(tmp_path: Path) -> None:
     assert payload[0]["profile"] == "buy2"
     assert payload[0]["available_count"] == 1
     assert payload[0]["credits"][0]["credit_id"] == "credit-123"
+    assert payload[0]["credits"][0]["expires_at_timestamp"] == 1783829062
 
 
 def test_chatgpt_reset_consume_cli_posts_reset_request(tmp_path: Path) -> None:
@@ -351,6 +353,75 @@ def test_chatgpt_reset_consume_cli_posts_reset_request(tmp_path: Path) -> None:
     mock_consume.assert_called_once_with(
         "buy2",
         "credit-123",
+        "12345678-1234-5678-1234-567812345678",
+        "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits",
+    )
+
+
+def test_chatgpt_reset_consume_cli_auto_selects_earliest_expiring_credit(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "profiles:\n  buy2:\n    token_dir: /tmp/buy2\n"
+    )
+
+    runner = CliRunner()
+    with patch(
+        "litellm.llms.chatgpt.login_cli._fetch_rate_limit_reset_credits_for_profile",
+        return_value=RateLimitResetCreditsResult(
+            profile="buy2",
+            account_id="acct-buy2-1234",
+            available_count=2,
+            credits=[
+                {
+                    "id": "credit-later",
+                    "status": "available",
+                    "expires_at": "2026-07-26T23:55:10.206755Z",
+                },
+                {
+                    "id": "credit-earlier",
+                    "status": "available",
+                    "expires_at": "2026-07-12T04:04:22.004436Z",
+                },
+            ],
+            status="ok",
+        ),
+    ) as mock_fetch, patch(
+        "litellm.llms.chatgpt.login_cli._consume_rate_limit_reset_credit_for_profile",
+        return_value=RateLimitResetCreditsResult(
+            profile="buy2",
+            account_id="acct-buy2-1234",
+            available_count=1,
+            credits=[],
+            status="ok",
+            code="reset",
+        ),
+    ) as mock_consume, patch(
+        "litellm.llms.chatgpt.login_cli._get_rate_limit_reset_credits_url",
+        return_value="https://chatgpt.com/backend-api/wham/rate-limit-reset-credits",
+    ), patch(
+        "litellm.llms.chatgpt.login_cli.uuid4",
+        return_value=UUID("12345678-1234-5678-1234-567812345678"),
+    ):
+        result = runner.invoke(
+            cli,
+            [
+                "reset",
+                "consume",
+                "buy2",
+                "--auto",
+                "--inventory",
+                str(config_path),
+            ],
+        )
+
+    assert result.exit_code == 0
+    assert "credit-earlier" in result.output
+    mock_fetch.assert_called_once()
+    mock_consume.assert_called_once_with(
+        "buy2",
+        "credit-earlier",
         "12345678-1234-5678-1234-567812345678",
         "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits",
     )
@@ -498,9 +569,12 @@ def test_chatgpt_reset_metrics_exporter_updates_prometheus_gauges() -> None:
                     {
                         "credit_id": "credit-123",
                         "title": "Weekly reset",
+                        "status": "available",
+                        "expires_at_timestamp": 1783829062,
                     }
                 ],
                 status="ok",
+                next_expires_at=1783829062,
             )
         ],
         refreshed_at=1700000000,
@@ -514,6 +588,14 @@ def test_chatgpt_reset_metrics_exporter_updates_prometheus_gauges() -> None:
     )
     assert (
         'litellm_chatgpt_rate_limit_reset_credit_count{profile="buy2"} 1.0'
+        in payload
+    )
+    assert (
+        'litellm_chatgpt_rate_limit_reset_next_expires_timestamp_seconds{profile="buy2"} 1.783829062e+09'
+        in payload
+    )
+    assert (
+        'litellm_chatgpt_rate_limit_reset_credit_expires_timestamp_seconds{credit_id="credit-123",profile="buy2",status="available"} 1.783829062e+09'
         in payload
     )
 
@@ -549,6 +631,10 @@ def test_chatgpt_reset_metrics_exporter_keeps_credit_count_on_business_error() -
     )
     assert (
         'litellm_chatgpt_rate_limit_reset_credit_count{profile="buy2"} 1.0'
+        in payload
+    )
+    assert (
+        'litellm_chatgpt_rate_limit_reset_next_expires_timestamp_seconds{profile="buy2"} NaN'
         in payload
     )
 

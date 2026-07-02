@@ -14,6 +14,7 @@ from litellm.llms.chatgpt.usage_service import (
     get_weekly_pacing_window,
     is_usage_result_expired,
     normalize_usage_payload,
+    select_rate_limit_reset_credit_id,
 )
 
 
@@ -175,6 +176,7 @@ def test_fetch_rate_limit_reset_credits_for_profile_parses_available_count_and_c
                 "credit_id": "credit-123",
                 "title": "Weekly reset",
                 "available": True,
+                "expires_at": "2026-07-12T04:04:22.004436Z",
             }
         ],
     }
@@ -197,12 +199,42 @@ def test_fetch_rate_limit_reset_credits_for_profile_parses_available_count_and_c
     assert result.status == "ok"
     assert result.available_count == 1
     assert result.code is None
+    assert result.next_expires_at == 1783829062
     assert result.credits[0]["credit_id"] == "credit-123"
     assert result.credits[0]["title"] == "Weekly reset"
+    assert result.credits[0]["expires_at_timestamp"] == 1783829062
     client.get.assert_called_once()
     request_headers = client.get.call_args.kwargs["headers"]
     assert request_headers["Authorization"] == "Bearer token"
     assert request_headers["ChatGPT-Account-Id"] == "acct_buy10"
+
+
+def test_select_rate_limit_reset_credit_id_prefers_earliest_available_expiry() -> None:
+    credit_id = select_rate_limit_reset_credit_id(
+        [
+            {
+                "id": "credit-later",
+                "status": "available",
+                "expires_at": "2026-07-26T23:55:10.206755Z",
+            },
+            {
+                "id": "credit-redeemed",
+                "status": "redeemed",
+                "expires_at": "2026-07-01T00:00:00Z",
+            },
+            {
+                "id": "credit-earlier",
+                "status": "available",
+                "expires_at": "2026-07-12T04:04:22.004436Z",
+            },
+            {
+                "id": "credit-no-expiry",
+                "status": "available",
+            },
+        ]
+    )
+
+    assert credit_id == "credit-earlier"
 
 
 def test_consume_rate_limit_reset_credit_for_profile_posts_expected_payload() -> None:
