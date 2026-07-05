@@ -46,6 +46,11 @@ from litellm.proxy.dd_span_tagger import DDSpanTagger
 from litellm.proxy.route_llm_request import route_request
 from litellm.proxy.utils import ProxyLogging
 from litellm.router import Router
+from litellm.types.llms.openai import (
+    ResponseFailedEvent,
+    ResponsesAPIResponse,
+    ResponsesAPIStreamEvents,
+)
 from litellm.types.utils import ServerToolUse
 
 # Type alias for streaming chunk serializer (chunk after hooks + cost injection -> wire format)
@@ -937,20 +942,47 @@ class ProxyBaseLLMRequestProcessing:
 
         ### ROUTE THE REQUEST ###
         # Do not change this - it should be a constant time fetch - ALWAYS
-        llm_call = await route_request(
-            data=self.data,
-            route_type=route_type,
-            llm_router=llm_router,
-            user_model=user_model,
-        )
-        tasks.append(llm_call)
+        try:
+            llm_call = await route_request(
+                data=self.data,
+                route_type=route_type,
+                llm_router=llm_router,
+                user_model=user_model,
+            )
+            tasks.append(llm_call)
 
-        # wait for call to end
-        llm_responses = asyncio.gather(
-            *tasks
-        )  # run the moderation check in parallel to the actual llm api call
+            # wait for call to end
+            llm_responses = asyncio.gather(
+                *tasks
+            )  # run the moderation check in parallel to the actual llm api call
 
-        responses = await llm_responses
+            responses = await llm_responses
+        except Exception as e:
+            if (
+                route_type == "aresponses"
+                and self._is_streaming_request(
+                    data=self.data, is_streaming_request=is_streaming_request
+                )
+                and isinstance(e, litellm.RateLimitError)
+            ):
+                special_response = await self._build_responses_rate_limit_failure_response(
+                    error=e,
+                    request=request,
+                    user_api_key_dict=user_api_key_dict,
+                    proxy_logging_obj=proxy_logging_obj,
+                    logging_obj=logging_obj,
+                    requested_model_from_client=requested_model_from_client,
+                    version=version,
+                )
+                if special_response is not None:
+                    return special_response
+
+            raise await self._handle_llm_api_exception(
+                e=e,
+                user_api_key_dict=user_api_key_dict,
+                proxy_logging_obj=proxy_logging_obj,
+                version=version,
+            )
 
         response = responses[1]
 
@@ -1209,6 +1241,119 @@ class ProxyBaseLLMRequestProcessing:
             return True
         return False
 
+    @staticmethod
+    def _extract_retry_after_seconds(error: Exception, default: int = 60) -> int:
+        """Best-effort parse of retry-after headers from a rate-limit exception."""
+        response = getattr(error, "response", None)
+        headers = getattr(response, "headers", None) or {}
+        retry_after = headers.get("retry-after")
+        if retry_after is None:
+            return default
+
+        try:
+            return max(1, int(float(retry_after)))
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _format_rate_limit_message(message: str, retry_after_seconds: int) -> str:
+        """Normalize LiteLLM's rate-limit message and add retry wording for Codex."""
+        cleaned_message = message.strip()
+        if cleaned_message.startswith("litellm.RateLimitError: "):
+            cleaned_message = cleaned_message.removeprefix(
+                "litellm.RateLimitError: "
+            ).strip()
+        cleaned_message = cleaned_message.rstrip(".")
+        return f"{cleaned_message}. Please try again in {retry_after_seconds}s."
+
+    async def _build_responses_rate_limit_failure_response(
+        self,
+        *,
+        error: Exception,
+        request: Request,
+        user_api_key_dict: UserAPIKeyAuth,
+        proxy_logging_obj: ProxyLogging,
+        logging_obj: Optional[LiteLLMLoggingObj],
+        requested_model_from_client: Optional[str],
+        version: Optional[str],
+    ) -> Optional[Union[StreamingResponse, JSONResponse]]:
+        """
+        Convert a pre-call Responses API rate-limit failure into a terminal SSE event.
+
+        Codex retries on `response.failed` with `error.code == "rate_limit_exceeded"`,
+        so we preserve the retry signal in the stream instead of returning a JSON 429.
+        """
+        if not isinstance(error, litellm.RateLimitError):
+            return None
+
+        await proxy_logging_obj.post_call_failure_hook(
+            user_api_key_dict=user_api_key_dict,
+            original_exception=error,
+            request_data=self.data,
+        )
+
+        retry_after_seconds = self._extract_retry_after_seconds(error)
+        error_message = self._format_rate_limit_message(
+            getattr(error, "message", str(error)),
+            retry_after_seconds,
+        )
+
+        response_obj = ResponsesAPIResponse(
+            id=f"resp_{uuid.uuid4()}",
+            object="response",
+            created_at=int(time.time()),
+            model=requested_model_from_client or self.data.get("model"),
+            output=[],
+            status="failed",
+            error={
+                "type": "rate_limit_error",
+                "code": "rate_limit_exceeded",
+                "message": error_message,
+            },
+        )
+        response_failed_event = ResponseFailedEvent(
+            type=ResponsesAPIStreamEvents.RESPONSE_FAILED,
+            response=response_obj,
+        )
+
+        headers = self.get_custom_headers(
+            user_api_key_dict=user_api_key_dict,
+            call_id=(
+                self.data.get("litellm_call_id")
+                or getattr(logging_obj, "litellm_call_id", None)
+            ),
+            version=version,
+            response_cost=0,
+            request_data=self.data,
+            litellm_logging_obj=logging_obj,
+        )
+        headers["retry-after"] = str(retry_after_seconds)
+
+        try:
+            callback_headers = await proxy_logging_obj.post_call_response_headers_hook(
+                data=self.data,
+                user_api_key_dict=user_api_key_dict,
+                response=None,
+                request_headers=(self.data.get("proxy_server_request") or {}).get(
+                    "headers", {}
+                ),
+            )
+            if callback_headers:
+                headers.update(callback_headers)
+        except Exception:
+            pass
+
+        async def error_stream() -> AsyncGenerator[str, None]:
+            # Emit a terminal Responses event so SSE clients can retry the stream.
+            yield f"data: {response_failed_event.model_dump_json(exclude_none=True)}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return await create_response(
+            generator=error_stream(),
+            media_type="text/event-stream",
+            headers=headers,
+        )
+
     async def _handle_llm_api_exception(
         self,
         e: Exception,
@@ -1295,6 +1440,7 @@ class ProxyBaseLLMRequestProcessing:
                 param=getattr(e, "param", "None"),
                 code=getattr(e, "status_code", status.HTTP_400_BAD_REQUEST),
                 provider_specific_fields=getattr(e, "provider_specific_fields", None),
+                error_extra_fields=getattr(e, "error_extra_fields", None),
                 headers=headers,
             )
         elif isinstance(e, httpx.HTTPStatusError):
@@ -1329,6 +1475,7 @@ class ProxyBaseLLMRequestProcessing:
             openai_code=getattr(e, "code", None),
             code=getattr(e, "status_code", 500),
             provider_specific_fields=getattr(e, "provider_specific_fields", None),
+            error_extra_fields=getattr(e, "error_extra_fields", None),
             headers=headers,
         )
 
@@ -1433,6 +1580,7 @@ class ProxyBaseLLMRequestProcessing:
                 type=getattr(e, "type", "None"),
                 param=getattr(e, "param", "None"),
                 code=getattr(e, "status_code", 500),
+                error_extra_fields=getattr(e, "error_extra_fields", None),
             )
             yield serialize_error(proxy_exception)
 

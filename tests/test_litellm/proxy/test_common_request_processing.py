@@ -1,8 +1,10 @@
 import copy
 import datetime
+import json
 from typing import AsyncGenerator
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from fastapi import Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -918,6 +920,104 @@ class TestCommonRequestProcessingHelpers:
         assert "error" in body
         assert body["error"]["code"] == "429"
         assert body["error"]["message"] == "too many requests"
+
+    async def test_base_process_llm_request_converts_responses_rate_limit_to_failed_sse(
+        self,
+    ):
+        processing_obj = ProxyBaseLLMRequestProcessing(
+            data={
+                "model": "gpt-4o",
+                "stream": True,
+                "litellm_call_id": "test-call-id",
+            }
+        )
+
+        mock_request = MagicMock(spec=Request)
+        mock_request.headers = {}
+        mock_fastapi_response = MagicMock()
+
+        mock_user_api_key_dict = MagicMock()
+        mock_user_api_key_dict.spend = 0.0
+        mock_user_api_key_dict.allowed_model_region = None
+        mock_user_api_key_dict.tpm_limit = None
+        mock_user_api_key_dict.rpm_limit = None
+        mock_user_api_key_dict.max_budget = None
+
+        mock_proxy_logging_obj = MagicMock()
+        mock_proxy_logging_obj.during_call_hook = AsyncMock(return_value=None)
+        mock_proxy_logging_obj.post_call_failure_hook = AsyncMock(return_value=None)
+        mock_proxy_logging_obj.post_call_response_headers_hook = AsyncMock(
+            return_value=None
+        )
+        mock_proxy_logging_obj.post_call_success_hook = AsyncMock(return_value=None)
+        mock_proxy_logging_obj.update_request_status = AsyncMock(return_value=None)
+
+        mock_logging_obj = MagicMock()
+        mock_logging_obj.litellm_call_id = "test-call-id"
+        mock_logging_obj.cost_breakdown = None
+
+        rate_limit_error = litellm.RateLimitError(
+            message="Model rate limit exceeded. TPM limit=1000, current usage=1000",
+            llm_provider="",
+            model="gpt-4o",
+            response=httpx.Response(
+                status_code=429,
+                headers={"retry-after": "60"},
+                request=httpx.Request("POST", "https://example.com"),
+            ),
+        )
+
+        with (
+            patch.object(
+                ProxyBaseLLMRequestProcessing,
+                "common_processing_pre_call_logic",
+                AsyncMock(
+                    return_value=(processing_obj.data.copy(), mock_logging_obj)
+                ),
+            ),
+            patch(
+                "litellm.proxy.common_request_processing.route_request",
+                side_effect=rate_limit_error,
+            ),
+        ):
+            response = await processing_obj.base_process_llm_request(
+                request=mock_request,
+                fastapi_response=mock_fastapi_response,
+                user_api_key_dict=mock_user_api_key_dict,
+                route_type="aresponses",
+                proxy_logging_obj=mock_proxy_logging_obj,
+                general_settings={},
+                proxy_config=MagicMock(spec=ProxyConfig),
+                select_data_generator=None,
+                llm_router=MagicMock(),
+                model=None,
+                user_model=None,
+                user_temperature=None,
+                user_request_timeout=None,
+                user_max_tokens=None,
+                user_api_base=None,
+                version="2024-01-01",
+                is_streaming_request=True,
+            )
+
+        assert isinstance(response, StreamingResponse)
+        assert response.headers["retry-after"] == "60"
+
+        content = await self.consume_stream(response)
+        assert len(content) == 2
+
+        first_event = json.loads(content[0][len("data: ") :].strip())
+        assert first_event["type"] == "response.failed"
+        assert first_event["response"]["status"] == "failed"
+        assert first_event["response"]["error"]["code"] == "rate_limit_exceeded"
+        assert "Please try again in 60s" in first_event["response"]["error"][
+            "message"
+        ]
+        assert content[1] == "data: [DONE]\n\n"
+
+        mock_proxy_logging_obj.post_call_failure_hook.assert_awaited_once()
+        mock_proxy_logging_obj.post_call_response_headers_hook.assert_awaited_once()
+        mock_proxy_logging_obj.post_call_success_hook.assert_not_called()
 
     async def test_create_streaming_response_custom_headers(self):
         async def mock_generator():

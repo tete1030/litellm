@@ -90,7 +90,7 @@ ROUTING_STRATEGY_DESCRIPTIONS: Dict[str, str] = {
     "cost-based-routing": "Routes to the deployment with the lowest cost per token.",
     "usage-based-routing": "Routes to the deployment with the lowest TPM (Tokens Per Minute) usage. (deprecated)",
     "usage-based-routing-v2": "Improved version of usage-based routing with better tracking.",
-    "chatgpt-pacing-weighted-shuffle": "Routes ChatGPT accounts by matching weekly remaining quota to the remaining time before reset or expiry.",
+    "chatgpt-pacing-weighted-shuffle": "Routes ChatGPT accounts with a smooth transition from balance-first pacing to aggressive burn-down as reset approaches.",
 }
 
 

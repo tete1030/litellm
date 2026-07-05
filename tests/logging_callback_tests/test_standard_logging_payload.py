@@ -183,6 +183,14 @@ def all_fields_present(standard_logging_metadata: StandardLoggingMetadata):
         ("spend_logs_metadata", {"key": "value"}),
         ("requester_ip_address", "127.0.0.1"),
         ("requester_metadata", {"user_agent": "test_agent"}),
+        ("chatgpt_auth_profile", "my"),
+        ("chatgpt_requested_service_tier", "priority"),
+        ("chatgpt_effective_service_tier", "default"),
+        ("chatgpt_fast_mode_requested", True),
+        ("chatgpt_fast_mode_effective", False),
+        ("chatgpt_profile_allow_fast_mode", True),
+        ("chatgpt_virtual_key_allow_fast_mode", False),
+        ("chatgpt_fast_mode_allowed", False),
     ],
 )
 def test_get_standard_logging_metadata(metadata_key, metadata_value):

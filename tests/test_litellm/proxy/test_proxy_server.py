@@ -163,6 +163,37 @@ def test_login_v2_returns_json_on_proxy_exception(monkeypatch):
     assert data["error"]["type"] == "auth_error"
 
 
+def test_proxy_exception_handler_keeps_codex_rate_limit_fields():
+    from litellm.proxy._types import ProxyException
+
+    @app.get("/codex-rate-limit-test")
+    async def _codex_rate_limit_test():
+        raise ProxyException(
+            message="ChatGPT usage limit reached",
+            type="usage_limit_reached",
+            param=None,
+            code=429,
+            headers={"x-codex-active-limit": "weekly-limit"},
+            error_extra_fields={"plan_type": "plus", "resets_at": 1700600000},
+        )
+
+    client = TestClient(app)
+    response = client.get("/codex-rate-limit-test")
+
+    assert response.status_code == 429
+    assert response.headers["x-codex-active-limit"] == "weekly-limit"
+    assert response.json() == {
+        "error": {
+            "message": "ChatGPT usage limit reached",
+            "type": "usage_limit_reached",
+            "param": None,
+            "code": "429",
+            "plan_type": "plus",
+            "resets_at": 1700600000,
+        }
+    }
+
+
 def test_login_v2_returns_json_on_http_exception(monkeypatch):
     """Test that /v2/login converts HTTPException to JSON error response"""
     from fastapi import HTTPException

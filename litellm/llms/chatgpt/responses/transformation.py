@@ -21,6 +21,7 @@ from ..authenticator import get_chatgpt_authenticator
 from ..common_utils import (
     CHATGPT_API_BASE,
     GetAccessTokenError,
+    apply_chatgpt_service_tier_policy,
     ensure_chatgpt_session_id,
     get_chatgpt_default_headers,
     get_chatgpt_default_instructions,
@@ -100,6 +101,7 @@ class ChatGPTResponsesAPIConfig(OpenAIResponsesAPIConfig):
         if "reasoning.encrypted_content" not in include:
             include.append("reasoning.encrypted_content")
         request["include"] = include
+        request = apply_chatgpt_service_tier_policy(request, litellm_params)
 
         allowed_keys = {
             "model",
@@ -113,6 +115,7 @@ class ChatGPTResponsesAPIConfig(OpenAIResponsesAPIConfig):
             "reasoning",
             "previous_response_id",
             "truncation",
+            "service_tier",
         }
 
         return {k: v for k, v in request.items() if k in allowed_keys}

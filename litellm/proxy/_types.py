@@ -3245,6 +3245,14 @@ class SpendLogsMetadata(TypedDict):
     cold_storage_object_key: Optional[
         str
     ]  # S3/GCS object key for cold storage retrieval
+    chatgpt_auth_profile: Optional[str]
+    chatgpt_requested_service_tier: Optional[str]
+    chatgpt_effective_service_tier: Optional[str]
+    chatgpt_fast_mode_requested: Optional[bool]
+    chatgpt_fast_mode_effective: Optional[bool]
+    chatgpt_profile_allow_fast_mode: Optional[bool]
+    chatgpt_virtual_key_allow_fast_mode: Optional[bool]
+    chatgpt_fast_mode_allowed: Optional[bool]
     litellm_overhead_time_ms: Optional[float]  # LiteLLM overhead time in milliseconds
     attempted_retries: Optional[
         int
@@ -3371,6 +3379,7 @@ class ProxyException(Exception):
         headers: Optional[Dict[str, str]] = None,
         openai_code: Optional[str] = None,  # maps to 'code'  in openai
         provider_specific_fields: Optional[dict] = None,
+        error_extra_fields: Optional[Dict[str, Any]] = None,
     ):
         self.message = str(message)
         self.type = type
@@ -3386,6 +3395,7 @@ class ProxyException(Exception):
                     headers[k] = str(v)
         self.headers = headers or {}
         self.provider_specific_fields = provider_specific_fields
+        self.error_extra_fields = error_extra_fields or {}
         # rules for proxyExceptions
         # Litellm router.py returns "No healthy deployment available" when there are no deployments available
         # Should map to 429 errors https://github.com/BerriAI/litellm/issues/2487
@@ -3407,6 +3417,8 @@ class ProxyException(Exception):
         }
         if self.provider_specific_fields:
             error_dict["provider_specific_fields"] = self.provider_specific_fields
+        if self.error_extra_fields:
+            error_dict.update(self.error_extra_fields)
         return error_dict
 
 

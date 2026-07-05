@@ -1152,6 +1152,31 @@ def test_get_spend_logs_metadata_guardrail_info_fallback_from_metadata():
     assert result["guardrail_information"] is None
 
 
+def test_get_spend_logs_metadata_preserves_chatgpt_fast_mode_metadata():
+    metadata = {
+        "user_api_key": "test-key",
+        "chatgpt_auth_profile": "my",
+        "chatgpt_requested_service_tier": "priority",
+        "chatgpt_effective_service_tier": "default",
+        "chatgpt_fast_mode_requested": True,
+        "chatgpt_fast_mode_effective": False,
+        "chatgpt_profile_allow_fast_mode": True,
+        "chatgpt_virtual_key_allow_fast_mode": False,
+        "chatgpt_fast_mode_allowed": False,
+    }
+
+    result = _get_spend_logs_metadata(metadata=metadata)
+
+    assert result["chatgpt_auth_profile"] == "my"
+    assert result["chatgpt_requested_service_tier"] == "priority"
+    assert result["chatgpt_effective_service_tier"] == "default"
+    assert result["chatgpt_fast_mode_requested"] is True
+    assert result["chatgpt_fast_mode_effective"] is False
+    assert result["chatgpt_profile_allow_fast_mode"] is True
+    assert result["chatgpt_virtual_key_allow_fast_mode"] is False
+    assert result["chatgpt_fast_mode_allowed"] is False
+
+
 def test_get_logging_payload_guardrail_info_when_no_standard_logging_payload():
     """
     When a guardrail blocks a request before the LLM call, the standard_logging_object

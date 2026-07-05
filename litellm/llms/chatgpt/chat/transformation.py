@@ -7,6 +7,7 @@ from litellm.types.llms.openai import AllMessageValues
 from ..authenticator import get_chatgpt_authenticator
 from ..common_utils import (
     GetAccessTokenError,
+    apply_chatgpt_service_tier_policy,
     ensure_chatgpt_session_id,
     get_chatgpt_default_headers,
     merge_chatgpt_headers,
@@ -82,6 +83,23 @@ class ChatGPTConfig(OpenAIConfig):
     def post_stream_processing(self, stream: Any) -> Any:
         return ChatGPTToolCallNormalizer(stream)
 
+    def transform_request(
+        self,
+        model: str,
+        messages: List[AllMessageValues],
+        optional_params: dict,
+        litellm_params: dict,
+        headers: dict,
+    ) -> dict:
+        request = super().transform_request(
+            model=model,
+            messages=messages,
+            optional_params=optional_params,
+            litellm_params=litellm_params,
+            headers=headers,
+        )
+        return apply_chatgpt_service_tier_policy(request, litellm_params)
+
     def map_openai_params(
         self,
         non_default_params: dict,
@@ -93,4 +111,4 @@ class ChatGPTConfig(OpenAIConfig):
             non_default_params, optional_params, model, drop_params
         )
         optional_params.setdefault("stream", False)
-        return optional_params
+        return apply_chatgpt_service_tier_policy(optional_params)

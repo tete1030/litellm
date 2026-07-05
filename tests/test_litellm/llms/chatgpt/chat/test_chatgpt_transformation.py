@@ -91,3 +91,50 @@ class TestChatGPTTransformation:
         assert api_key == "chatgpt-oauth"
         assert provider == "chatgpt"
         mock_get_chatgpt_authenticator.assert_called_with(litellm_params)
+
+    def test_map_openai_params_normalizes_fast_service_tier(self):
+        config = ChatGPTConfig()
+
+        optional_params = config.map_openai_params(
+            non_default_params={"service_tier": "fast"},
+            optional_params={},
+            model="chatgpt/gpt-5.4",
+            drop_params=True,
+        )
+
+        assert optional_params["service_tier"] == "priority"
+
+    def test_transform_request_strips_fast_service_tier_for_restricted_profile(self):
+        config = ChatGPTConfig()
+
+        request = config.transform_request(
+            model="chatgpt/gpt-5.4",
+            messages=[{"role": "user", "content": "hello"}],
+            optional_params={"service_tier": "priority"},
+            litellm_params={"chatgpt_allow_fast_mode": False},
+            headers={},
+        )
+
+        assert "service_tier" not in request
+
+    def test_transform_request_strips_fast_service_tier_for_restricted_virtual_key(
+        self,
+    ):
+        config = ChatGPTConfig()
+
+        request = config.transform_request(
+            model="chatgpt/gpt-5.4",
+            messages=[{"role": "user", "content": "hello"}],
+            optional_params={"service_tier": "priority"},
+            litellm_params={
+                "chatgpt_allow_fast_mode": True,
+                "metadata": {
+                    "user_api_key_auth_metadata": {
+                        "chatgpt_virtual_key_allow_fast_mode": False
+                    }
+                },
+            },
+            headers={},
+        )
+
+        assert "service_tier" not in request

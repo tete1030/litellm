@@ -7,7 +7,7 @@ from typing import Any, Dict, Iterable, List
 
 import yaml as pyyaml
 
-INVENTORY_ALLOWED_TOP_LEVEL_KEYS = {"profiles", "models"}
+INVENTORY_ALLOWED_TOP_LEVEL_KEYS = {"defaults", "profiles", "models"}
 MANAGED_RENDER_KEYS = ("chatgpt_auth_profiles", "model_list")
 
 
@@ -45,8 +45,11 @@ def load_inventory(path: Path) -> Dict[str, Any]:
         raise ValueError(
             "Unsupported top-level inventory keys: " + ", ".join(unexpected_keys)
         )
+    defaults = inventory.setdefault("defaults", {})
     profiles = inventory.setdefault("profiles", {})
     models = inventory.setdefault("models", {})
+    if not isinstance(defaults, dict):
+        raise ValueError("defaults must be a mapping")
     if not isinstance(profiles, dict):
         raise ValueError("profiles must be a mapping")
     if not isinstance(models, dict):
@@ -188,6 +191,19 @@ def _model_override(profile_entry: Dict[str, Any], model_name: str) -> Dict[str,
     return override if isinstance(override, dict) else {}
 
 
+def _allow_fast_mode(
+    inventory: Dict[str, Any], profile_entry: Dict[str, Any], override: Dict[str, Any]
+) -> bool:
+    defaults = inventory.get("defaults") or {}
+    if "allow_fast_mode" in override:
+        return bool(override.get("allow_fast_mode"))
+    if "allow_fast_mode" in profile_entry:
+        return bool(profile_entry.get("allow_fast_mode"))
+    if "allow_fast_mode" in defaults:
+        return bool(defaults.get("allow_fast_mode"))
+    return True
+
+
 def _deployment_id(
     profile_name: str, model_entry: Dict[str, Any], override: Dict[str, Any]
 ) -> str:
@@ -222,6 +238,7 @@ def _render_model_list(inventory: Dict[str, Any]) -> List[Dict[str, Any]]:
             mode = override.get("mode", model_entry.get("mode", "responses"))
             weight = override.get("weight", profile_entry.get("weight", 1))
             provider = override.get("provider_model", provider_model)
+            allow_fast_mode = _allow_fast_mode(inventory, profile_entry, override)
             model_list.append(
                 {
                     "model_name": model_name,
@@ -232,6 +249,7 @@ def _render_model_list(inventory: Dict[str, Any]) -> List[Dict[str, Any]]:
                     "litellm_params": {
                         "model": provider,
                         "chatgpt_auth_profile": profile_name,
+                        "chatgpt_allow_fast_mode": allow_fast_mode,
                         "weight": weight,
                     },
                 }

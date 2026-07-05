@@ -3,7 +3,7 @@ Constants and helpers for ChatGPT subscription OAuth.
 """
 import os
 import platform
-from typing import Any, Optional, Union
+from typing import Any, Dict, Optional, Union
 from uuid import uuid4
 
 import httpx
@@ -25,6 +25,8 @@ CHATGPT_OAUTH_SCOPE = (
 
 DEFAULT_ORIGINATOR = "codex_cli_rs"
 DEFAULT_USER_AGENT = "codex_cli_rs/0.0.0 (Unknown 0; unknown) unknown"
+CHATGPT_FAST_SERVICE_TIER = "priority"
+CHATGPT_LEGACY_FAST_SERVICE_TIER = "fast"
 CHATGPT_DEFAULT_INSTRUCTIONS = """You are Codex, based on GPT-5. You are running as a coding agent in the Codex CLI on a user's computer.
 
 ## General
@@ -257,6 +259,148 @@ def get_chatgpt_default_headers(
     if account_id:
         headers["ChatGPT-Account-Id"] = account_id
     return headers
+
+
+def normalize_chatgpt_service_tier(service_tier: Any) -> Any:
+    if not isinstance(service_tier, str):
+        return service_tier
+
+    normalized = service_tier.strip().lower()
+    if not normalized:
+        return None
+    if normalized == CHATGPT_LEGACY_FAST_SERVICE_TIER:
+        return CHATGPT_FAST_SERVICE_TIER
+    return normalized
+
+
+def _get_param_value(source: Optional[Any], key: str) -> Any:
+    if isinstance(source, dict):
+        return source.get(key)
+    if source is None:
+        return None
+    return getattr(source, key, None)
+
+
+def _coerce_optional_bool(value: Any) -> Optional[bool]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "y", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "n", "off"}:
+            return False
+    return bool(value)
+
+
+def _get_chatgpt_virtual_key_fast_mode_default() -> bool:
+    try:
+        import litellm
+
+        configured_default = getattr(
+            litellm, "chatgpt_virtual_key_allow_fast_mode_default", True
+        )
+    except Exception:
+        configured_default = True
+    coerced = _coerce_optional_bool(configured_default)
+    return True if coerced is None else coerced
+
+
+def _iter_chatgpt_fast_mode_metadata_sources(
+    metadata: Optional[Any],
+    litellm_params: Optional[Any] = None,
+):
+    candidates = [
+        metadata,
+        _get_param_value(litellm_params, "metadata"),
+        _get_param_value(litellm_params, "litellm_metadata"),
+    ]
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        yield candidate
+        for nested_key in ("user_api_key_auth_metadata", "user_api_key_metadata"):
+            nested_metadata = candidate.get(nested_key)
+            if isinstance(nested_metadata, dict):
+                yield nested_metadata
+        auth_obj = candidate.get("user_api_key_auth")
+        auth_metadata = getattr(auth_obj, "metadata", None)
+        if isinstance(auth_metadata, dict):
+            yield auth_metadata
+
+
+def chatgpt_profile_fast_mode_allowed(litellm_params: Optional[Any]) -> bool:
+    if isinstance(litellm_params, dict):
+        return bool(litellm_params.get("chatgpt_allow_fast_mode", True))
+    if litellm_params is None:
+        return True
+    return bool(getattr(litellm_params, "chatgpt_allow_fast_mode", True))
+
+
+def chatgpt_virtual_key_fast_mode_allowed(
+    metadata: Optional[Any] = None,
+    litellm_params: Optional[Any] = None,
+) -> bool:
+    for metadata_source in _iter_chatgpt_fast_mode_metadata_sources(
+        metadata, litellm_params
+    ):
+        for key in (
+            "chatgpt_virtual_key_allow_fast_mode",
+            "chatgpt_allow_fast_mode",
+        ):
+            if key in metadata_source:
+                coerced = _coerce_optional_bool(metadata_source.get(key))
+                if coerced is not None:
+                    return coerced
+    return _get_chatgpt_virtual_key_fast_mode_default()
+
+
+def chatgpt_fast_mode_allowance(
+    litellm_params: Optional[Any],
+    metadata: Optional[Any] = None,
+) -> Dict[str, bool]:
+    profile_allowed = chatgpt_profile_fast_mode_allowed(litellm_params)
+    virtual_key_allowed = chatgpt_virtual_key_fast_mode_allowed(
+        metadata=metadata, litellm_params=litellm_params
+    )
+    return {
+        "profile_allowed": profile_allowed,
+        "virtual_key_allowed": virtual_key_allowed,
+        "allowed": profile_allowed and virtual_key_allowed,
+    }
+
+
+def chatgpt_fast_mode_allowed(
+    litellm_params: Optional[Any],
+    metadata: Optional[Any] = None,
+) -> bool:
+    return chatgpt_fast_mode_allowance(litellm_params, metadata)["allowed"]
+
+
+def apply_chatgpt_service_tier_policy(
+    request: dict,
+    litellm_params: Optional[Any] = None,
+) -> dict:
+    normalized_service_tier = normalize_chatgpt_service_tier(
+        request.get("service_tier")
+    )
+    if normalized_service_tier is None:
+        request.pop("service_tier", None)
+        return request
+
+    if (
+        normalized_service_tier == CHATGPT_FAST_SERVICE_TIER
+        and not chatgpt_fast_mode_allowed(litellm_params)
+    ):
+        request.pop("service_tier", None)
+        return request
+
+    request["service_tier"] = normalized_service_tier
+    return request
 
 
 def merge_chatgpt_headers(

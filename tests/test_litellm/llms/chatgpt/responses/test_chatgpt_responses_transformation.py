@@ -225,6 +225,52 @@ class TestChatGPTResponsesAPITransformation:
         assert request["tools"] == [{"type": "function", "function": {"name": "hello"}}]
         assert request["tool_choice"] == {"type": "function", "function": {"name": "hello"}}
 
+    def test_chatgpt_normalizes_fast_service_tier_to_priority(self):
+        config = ChatGPTResponsesAPIConfig()
+
+        request = config.transform_responses_api_request(
+            model="chatgpt/gpt-5.3-codex",
+            input="hi",
+            response_api_optional_request_params={"service_tier": "fast"},
+            litellm_params=GenericLiteLLMParams(),
+            headers={},
+        )
+
+        assert request["service_tier"] == "priority"
+
+    def test_chatgpt_strips_fast_service_tier_for_restricted_profile(self):
+        config = ChatGPTResponsesAPIConfig()
+
+        request = config.transform_responses_api_request(
+            model="chatgpt/gpt-5.3-codex",
+            input="hi",
+            response_api_optional_request_params={"service_tier": "priority"},
+            litellm_params=GenericLiteLLMParams(chatgpt_allow_fast_mode=False),
+            headers={},
+        )
+
+        assert "service_tier" not in request
+
+    def test_chatgpt_strips_fast_service_tier_for_restricted_virtual_key(self):
+        config = ChatGPTResponsesAPIConfig()
+
+        request = config.transform_responses_api_request(
+            model="chatgpt/gpt-5.3-codex",
+            input="hi",
+            response_api_optional_request_params={"service_tier": "priority"},
+            litellm_params=GenericLiteLLMParams(
+                chatgpt_allow_fast_mode=True,
+                metadata={
+                    "user_api_key_auth_metadata": {
+                        "chatgpt_virtual_key_allow_fast_mode": False
+                    }
+                },
+            ),
+            headers={},
+        )
+
+        assert "service_tier" not in request
+
     @pytest.mark.parametrize(
         ("model_name", "response_model"),
         [

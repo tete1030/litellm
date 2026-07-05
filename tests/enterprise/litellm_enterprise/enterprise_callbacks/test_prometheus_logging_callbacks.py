@@ -178,6 +178,78 @@ async def test_async_log_success_event(prometheus_logger):
     prometheus_logger.litellm_request_total_latency_metric.labels.assert_called()
 
 
+@pytest.mark.asyncio
+async def test_async_log_success_event_tracks_chatgpt_fast_mode_tokens_from_standard_metadata(
+    prometheus_logger,
+):
+    standard_logging_object = create_standard_logging_payload()
+    standard_logging_object["model"] = "chatgpt/gpt-5.5"
+    standard_logging_object["model_group"] = "gpt-5.5"
+    standard_logging_object["model_id"] = "chatgpt-my-55"
+    standard_logging_object["custom_llm_provider"] = "chatgpt"
+    standard_logging_object["metadata"].update(
+        {
+            "chatgpt_auth_profile": "my",
+            "chatgpt_requested_service_tier": "priority",
+            "chatgpt_effective_service_tier": "default",
+            "chatgpt_fast_mode_requested": True,
+            "chatgpt_fast_mode_effective": False,
+        }
+    )
+    kwargs = {
+        "model": "chatgpt/gpt-5.5",
+        "stream": False,
+        "litellm_params": {
+            "metadata": {
+                "user_api_key": "test_key",
+                "user_api_key_user_id": "test_user",
+                "user_api_key_team_id": "test_team",
+                "user_api_key_end_user_id": "test_end_user",
+            },
+        },
+        "start_time": datetime.now(),
+        "completion_start_time": datetime.now(),
+        "api_call_start_time": datetime.now(),
+        "end_time": datetime.now() + timedelta(seconds=1),
+        "standard_logging_object": standard_logging_object,
+    }
+    response_obj = MagicMock()
+
+    prometheus_logger.chatgpt_fast_mode_metrics = MagicMock()
+    prometheus_logger.litellm_requests_metric = MagicMock()
+    prometheus_logger.litellm_spend_metric = MagicMock()
+    prometheus_logger.litellm_tokens_metric = MagicMock()
+    prometheus_logger.litellm_input_tokens_metric = MagicMock()
+    prometheus_logger.litellm_output_tokens_metric = MagicMock()
+    prometheus_logger.litellm_prompt_cache_hit_requests_metric = MagicMock()
+    prometheus_logger.litellm_prompt_cache_miss_requests_metric = MagicMock()
+    prometheus_logger.litellm_prompt_cached_input_tokens_metric = MagicMock()
+    prometheus_logger.litellm_prompt_uncached_input_tokens_metric = MagicMock()
+    prometheus_logger.litellm_remaining_team_budget_metric = MagicMock()
+    prometheus_logger.litellm_remaining_api_key_budget_metric = MagicMock()
+    prometheus_logger.litellm_remaining_api_key_requests_for_model = MagicMock()
+    prometheus_logger.litellm_remaining_api_key_tokens_for_model = MagicMock()
+    prometheus_logger.litellm_llm_api_time_to_first_token_metric = MagicMock()
+    prometheus_logger.litellm_llm_api_latency_metric = MagicMock()
+    prometheus_logger.litellm_request_total_latency_metric = MagicMock()
+
+    await prometheus_logger.async_log_success_event(
+        kwargs, response_obj, kwargs["start_time"], kwargs["end_time"]
+    )
+
+    prometheus_logger.chatgpt_fast_mode_metrics.observe_usage.assert_called_once_with(
+        model_name="gpt-5.5",
+        model_id="chatgpt-my-55",
+        profile="my",
+        requested_service_tier="priority",
+        effective_service_tier="default",
+        prompt_tokens=20,
+        completion_tokens=10,
+        total_tokens=30,
+        virtual_key="test_alias",
+    )
+
+
 def test_increment_token_metrics(prometheus_logger):
     """
     Test the increment_token_metrics method
@@ -1283,6 +1355,10 @@ async def test_async_log_success_event_with_top_level_metadata(
     prometheus_logger.litellm_cache_hits_metric = create_mock_metric()
     prometheus_logger.litellm_cache_misses_metric = create_mock_metric()
     prometheus_logger.litellm_cached_tokens_metric = create_mock_metric()
+    prometheus_logger.litellm_prompt_cache_hit_requests_metric = create_mock_metric()
+    prometheus_logger.litellm_prompt_cache_miss_requests_metric = create_mock_metric()
+    prometheus_logger.litellm_prompt_cached_input_tokens_metric = create_mock_metric()
+    prometheus_logger.litellm_prompt_uncached_input_tokens_metric = create_mock_metric()
     # Deployment metrics
     prometheus_logger.litellm_deployment_state = create_mock_metric()
     prometheus_logger.litellm_deployment_success_responses = create_mock_metric()

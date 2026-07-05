@@ -2584,6 +2584,14 @@ class StandardLoggingMetadata(StandardLoggingUserAPIKeyMetadata):
     cold_storage_object_key: Optional[
         str
     ]  # S3/GCS object key for cold storage retrieval
+    chatgpt_auth_profile: Optional[str]
+    chatgpt_requested_service_tier: Optional[str]
+    chatgpt_effective_service_tier: Optional[str]
+    chatgpt_fast_mode_requested: Optional[bool]
+    chatgpt_fast_mode_effective: Optional[bool]
+    chatgpt_profile_allow_fast_mode: Optional[bool]
+    chatgpt_virtual_key_allow_fast_mode: Optional[bool]
+    chatgpt_fast_mode_allowed: Optional[bool]
     team_alias: Optional[str]
     team_id: Optional[str]
 
