@@ -257,6 +257,7 @@ def image_generation(  # noqa: PLR0915
             "default_headers",
             "timeout",
             "max_retries",
+            "chatgpt_auth_profile",
             "n",
             "quality",
             "size",
@@ -294,6 +295,21 @@ def image_generation(  # noqa: PLR0915
         )
 
         litellm_params_dict = get_litellm_params(**kwargs)
+        if custom_llm_provider == "chatgpt":
+            from litellm.llms.chatgpt.images.auth import (
+                resolve_chatgpt_image_auth,
+            )
+
+            chatgpt_auth = resolve_chatgpt_image_auth(
+                litellm_params=litellm_params_dict,
+                headers=headers,
+                model=model,
+            )
+            api_key = chatgpt_auth.api_key
+            api_base = chatgpt_auth.api_base
+            headers = dict(chatgpt_auth.headers)
+            extra_headers = dict(chatgpt_auth.headers)
+            client = None
 
         logging: Logging = litellm_logging_obj
         logging.update_from_kwargs(
@@ -757,6 +773,9 @@ def image_edit(  # noqa: PLR0915
     """
     Maps the image edit functionality, similar to OpenAI's images/edits endpoint.
     """
+    images_alias = kwargs.pop("images", None)
+    if image is None and images_alias is not None:
+        image = images_alias
     local_vars = locals()
     try:
         openai_params = [
@@ -809,6 +828,19 @@ def image_edit(  # noqa: PLR0915
             model=model or DEFAULT_IMAGE_ENDPOINT_MODEL,
             custom_llm_provider=custom_llm_provider,
         )
+        if custom_llm_provider == "chatgpt":
+            from litellm.llms.chatgpt.images.auth import (
+                resolve_chatgpt_image_auth,
+            )
+
+            chatgpt_auth = resolve_chatgpt_image_auth(
+                litellm_params=litellm_params,
+                headers=extra_headers,
+                model=model,
+            )
+            litellm_params.api_key = chatgpt_auth.api_key
+            litellm_params.api_base = chatgpt_auth.api_base
+            extra_headers = dict(chatgpt_auth.headers)
 
         # Check for custom provider
         if custom_llm_provider in litellm._custom_providers:
@@ -988,9 +1020,9 @@ def image_edit(  # noqa: PLR0915
 
 @client
 async def aimage_edit(
-    image: Union[FileTypes, List[FileTypes]],
-    model: str,
-    prompt: str,
+    image: Optional[Union[FileTypes, List[FileTypes]]] = None,
+    model: Optional[str] = None,
+    prompt: Optional[str] = None,
     mask: Optional[str] = None,
     n: Optional[int] = None,
     quality: Optional[Union[str, ImageGenerationRequestQuality]] = None,
@@ -1017,6 +1049,9 @@ async def aimage_edit(
     Returns:
     - `response` (Any): The response returned by the `image_edit` function.
     """
+    images_alias = kwargs.pop("images", None)
+    if image is None and images_alias is not None:
+        image = images_alias
     local_vars = locals()
     try:
         loop = asyncio.get_event_loop()
@@ -1025,10 +1060,13 @@ async def aimage_edit(
         # get custom llm provider so we can use this for mapping exceptions
         if custom_llm_provider is None:
             _, custom_llm_provider, _, _ = litellm.get_llm_provider(
-                model=model, api_base=local_vars.get("base_url", None)
+                model=model or DEFAULT_IMAGE_ENDPOINT_MODEL,
+                api_base=local_vars.get("base_url", None),
             )
 
-        images = image if isinstance(image, list) else [image]
+        images = (
+            image if isinstance(image, list) else ([image] if image is not None else [])
+        )
 
         func = partial(
             image_edit,

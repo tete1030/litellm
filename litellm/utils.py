@@ -8888,7 +8888,13 @@ class ProviderConfigManager:
         model: str,
         provider: LlmProviders,
     ) -> Optional[BaseImageEditConfig]:
-        if LlmProviders.OPENAI == provider:
+        if LlmProviders.CHATGPT == provider:
+            from litellm.llms.chatgpt.images.transformation import (
+                ChatGPTImageEditConfig,
+            )
+
+            return ChatGPTImageEditConfig()
+        elif LlmProviders.OPENAI == provider:
             from litellm.llms.openai.image_edit import get_openai_image_edit_config
 
             return get_openai_image_edit_config(model=model)
