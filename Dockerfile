@@ -193,7 +193,7 @@ RUN GLOBAL="$(npm root -g)" && \
 # Convert Windows line endings to Unix for entrypoint scripts
 RUN sed -i 's/\r$//' docker/entrypoint.sh && \
     sed -i 's/\r$//' docker/prod_entrypoint.sh && \
-    chmod +x docker/entrypoint.sh docker/prod_entrypoint.sh && \
+    chmod 0755 docker/entrypoint.sh docker/prod_entrypoint.sh && \
     mkdir -p /nonexistent /.npm /var/lib/litellm/assets /var/lib/litellm/ui && \
     chown -R nobody:nogroup /app /var/lib/litellm/ui /var/lib/litellm/assets /nonexistent /.npm && \
     pip uninstall jwt -y || true && \
