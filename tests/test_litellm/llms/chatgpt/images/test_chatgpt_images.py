@@ -10,7 +10,10 @@ from litellm.llms.chatgpt.images.auth import (
     ChatGPTImageAuth,
     resolve_chatgpt_image_auth,
 )
-from litellm.llms.chatgpt.images.transformation import ChatGPTImageEditConfig
+from litellm.llms.chatgpt.images.transformation import (
+    ChatGPTImageEditConfig,
+    ChatGPTImageGenerationConfig,
+)
 from litellm.types.router import GenericLiteLLMParams
 
 
@@ -78,24 +81,26 @@ def test_resolve_chatgpt_image_auth_uses_profile_and_protects_headers(
     assert "Originator" not in result.headers
 
 
-@patch("litellm.images.main.openai_chat_completions")
+@patch("litellm.images.main.llm_http_handler")
 @patch(
     "litellm.llms.chatgpt.images.auth.resolve_chatgpt_image_auth",
     return_value=_resolved_auth(),
 )
-def test_chatgpt_image_generation_uses_native_oauth(
+def test_chatgpt_image_generation_routes_native_json(
     mock_resolve_auth: MagicMock,
-    mock_openai_chat_completions: MagicMock,
+    mock_http_handler: MagicMock,
 ) -> None:
     expected_response = litellm.utils.ImageResponse(
         created=123,
         data=[{"b64_json": "image-data"}],
     )
-    mock_openai_chat_completions.image_generation.return_value = expected_response
+    mock_http_handler.image_generation_handler.return_value = expected_response
 
     response = image_generation(
         model="chatgpt/gpt-image-2",
         prompt="Draw a red circle",
+        quality="low",
+        response_format="b64_json",
         chatgpt_auth_profile="account-a",
         client=MagicMock(),
         extra_headers={"X-Trace": "trace-123"},
@@ -105,13 +110,50 @@ def test_chatgpt_image_generation_uses_native_oauth(
     auth_params = mock_resolve_auth.call_args.kwargs["litellm_params"]
     assert auth_params["chatgpt_auth_profile"] == "account-a"
 
-    call_kwargs = mock_openai_chat_completions.image_generation.call_args.kwargs
+    call_kwargs = mock_http_handler.image_generation_handler.call_args.kwargs
+    assert isinstance(
+        call_kwargs["image_generation_provider_config"],
+        ChatGPTImageGenerationConfig,
+    )
     assert call_kwargs["api_key"] == "real-oauth-token"
-    assert call_kwargs["api_base"] == "https://chatgpt.com/backend-api/codex"
     assert call_kwargs["client"] is None
-    assert call_kwargs["headers"] == _resolved_auth().headers
-    assert call_kwargs["optional_params"]["extra_headers"] == _resolved_auth().headers
-    assert "chatgpt_auth_profile" not in call_kwargs["optional_params"]
+    assert call_kwargs["extra_headers"] == _resolved_auth().headers
+    assert call_kwargs["litellm_params"]["api_base"] == "https://chatgpt.com/backend-api/codex"
+    assert call_kwargs["image_generation_optional_request_params"] == {"quality": "low"}
+
+
+def test_chatgpt_image_generation_transforms_json_request() -> None:
+    config = ChatGPTImageGenerationConfig()
+    optional_params = config.map_openai_params(
+        non_default_params={
+            "background": "auto",
+            "n": 1,
+            "quality": "low",
+            "response_format": "b64_json",
+            "size": "auto",
+        },
+        optional_params={},
+        model="gpt-image-2",
+        drop_params=False,
+    )
+
+    data = config.transform_image_generation_request(
+        model="gpt-image-2",
+        prompt="Draw a red circle",
+        optional_params=optional_params,
+        litellm_params={},
+        headers={},
+    )
+
+    assert config.use_multipart_form_data() is False
+    assert data == {
+        "background": "auto",
+        "model": "gpt-image-2",
+        "n": 1,
+        "prompt": "Draw a red circle",
+        "quality": "low",
+        "size": "auto",
+    }
 
 
 def test_chatgpt_image_edit_transforms_data_urls_and_bytes() -> None:

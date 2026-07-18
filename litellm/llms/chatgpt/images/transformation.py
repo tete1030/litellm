@@ -1,7 +1,7 @@
 import base64
 import mimetypes
 import os
-from typing import Any, Dict, Optional, Tuple, Union, cast
+from typing import Any, Dict, List, Optional, Tuple, Union, cast
 
 import httpx
 from httpx._types import RequestFiles
@@ -9,13 +9,133 @@ from httpx._types import RequestFiles
 from litellm.images.utils import ImageEditRequestUtils
 from litellm.llms.base_llm.chat.transformation import BaseLLMException
 from litellm.llms.base_llm.image_edit.transformation import BaseImageEditConfig
+from litellm.llms.base_llm.image_generation.transformation import (
+    BaseImageGenerationConfig,
+)
 from litellm.types.images.main import ImageEditOptionalRequestParams
+from litellm.types.llms.openai import (
+    AllMessageValues,
+    OpenAIImageGenerationOptionalParams,
+)
 from litellm.types.router import GenericLiteLLMParams
 from litellm.types.utils import FileTypes, ImageResponse
 
 
 class ChatGPTImageError(BaseLLMException):
     pass
+
+
+class ChatGPTImageGenerationConfig(BaseImageGenerationConfig):
+    """Translate image generation inputs to the ChatGPT Codex JSON contract."""
+
+    def get_supported_openai_params(self, model: str) -> List[OpenAIImageGenerationOptionalParams]:
+        return ["background", "n", "quality", "response_format", "size"]
+
+    def map_openai_params(
+        self,
+        non_default_params: dict,
+        optional_params: dict,
+        model: str,
+        drop_params: bool,
+    ) -> dict:
+        supported_params = self.get_supported_openai_params(model)
+        for key, value in non_default_params.items():
+            if key not in supported_params:
+                if not drop_params:
+                    raise ValueError(
+                        f"Parameter {key} is not supported for model {model}. "
+                        f"Supported parameters are {supported_params}."
+                    )
+                continue
+            if key == "response_format":
+                if value != "b64_json" and not drop_params:
+                    raise ValueError("ChatGPT image generation only supports response_format='b64_json'")
+                continue
+            optional_params[key] = value
+        return optional_params
+
+    def validate_environment(
+        self,
+        headers: dict,
+        model: str,
+        messages: List[AllMessageValues],
+        optional_params: dict,
+        litellm_params: dict,
+        api_key: Optional[str] = None,
+        api_base: Optional[str] = None,
+    ) -> dict:
+        if not api_key:
+            raise ValueError("ChatGPT OAuth access token is required")
+        headers["Authorization"] = f"Bearer {api_key}"
+        headers.setdefault("content-type", "application/json")
+        headers.setdefault("accept", "application/json")
+        return headers
+
+    def get_complete_url(
+        self,
+        api_base: Optional[str],
+        api_key: Optional[str],
+        model: str,
+        optional_params: dict,
+        litellm_params: dict,
+        stream: Optional[bool] = None,
+    ) -> str:
+        if not api_base:
+            raise ValueError("ChatGPT API base is required")
+        api_base = api_base.rstrip("/")
+        if api_base.endswith("/images/generations"):
+            return api_base
+        return f"{api_base}/images/generations"
+
+    def transform_image_generation_request(
+        self,
+        model: str,
+        prompt: str,
+        optional_params: dict,
+        litellm_params: dict,
+        headers: dict,
+    ) -> dict:
+        request_body = {
+            key: value for key, value in optional_params.items() if key in {"background", "n", "quality", "size"}
+        }
+        request_body.update({"model": model, "prompt": prompt})
+        return request_body
+
+    def transform_image_generation_response(
+        self,
+        model: str,
+        raw_response: httpx.Response,
+        model_response: ImageResponse,
+        logging_obj: Any,
+        request_data: dict,
+        optional_params: dict,
+        litellm_params: dict,
+        encoding: Any,
+        api_key: Optional[str] = None,
+        json_mode: Optional[bool] = None,
+    ) -> ImageResponse:
+        try:
+            response_json = raw_response.json()
+        except Exception as exc:
+            raise ChatGPTImageError(
+                status_code=raw_response.status_code,
+                message=raw_response.text,
+                headers=raw_response.headers,
+                response=raw_response,
+            ) from exc
+        return ImageResponse(**response_json)
+
+    def get_error_class(
+        self,
+        error_message: str,
+        status_code: int,
+        headers: Union[dict, httpx.Headers],
+    ) -> BaseLLMException:
+        return ChatGPTImageError(
+            status_code=status_code,
+            message=error_message,
+            headers=headers,
+        )
 
 
 class ChatGPTImageEditConfig(BaseImageEditConfig):

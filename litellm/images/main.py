@@ -255,6 +255,7 @@ def image_generation(  # noqa: PLR0915
             "organization",
             "base_url",
             "default_headers",
+            "extra_headers",
             "timeout",
             "max_retries",
             "chatgpt_auth_profile",
@@ -270,7 +271,13 @@ def image_generation(  # noqa: PLR0915
         }  # model-specific params - pass them straight to the model/provider
 
         image_generation_config: Optional[BaseImageGenerationConfig] = None
-        if (
+        if custom_llm_provider == "chatgpt":
+            from litellm.llms.chatgpt.images.transformation import (
+                ChatGPTImageGenerationConfig,
+            )
+
+            image_generation_config = ChatGPTImageGenerationConfig()
+        elif (
             custom_llm_provider is not None
             and custom_llm_provider in LlmProviders._member_map_.values()
         ):
@@ -310,6 +317,8 @@ def image_generation(  # noqa: PLR0915
             headers = dict(chatgpt_auth.headers)
             extra_headers = dict(chatgpt_auth.headers)
             client = None
+            litellm_params_dict["api_key"] = api_key
+            litellm_params_dict["api_base"] = api_base
 
         logging: Logging = litellm_logging_obj
         logging.update_from_kwargs(
@@ -415,6 +424,7 @@ def image_generation(  # noqa: PLR0915
         # Providers using llm_http_handler
         #########################################################
         elif custom_llm_provider in (
+            litellm.LlmProviders.CHATGPT,
             litellm.LlmProviders.RECRAFT,
             litellm.LlmProviders.AIML,
             litellm.LlmProviders.GEMINI,
@@ -444,6 +454,7 @@ def image_generation(  # noqa: PLR0915
                 logging_obj=litellm_logging_obj,
                 timeout=timeout,
                 client=client,
+                extra_headers=extra_headers,
             )
         elif custom_llm_provider == "black_forest_labs":
             # Route to BFL-specific handler (polling required)
