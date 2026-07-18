@@ -129,12 +129,12 @@ RUN for i in 1 2 3; do \
   && { apk del --no-cache npm 2>/dev/null || true; }
 
 # Copy artifacts from builder
-COPY --from=builder /app/requirements.txt /app/requirements.txt
-COPY --from=builder /app/docker/entrypoint.sh /app/docker/prod_entrypoint.sh /app/docker/
-COPY --from=builder /app/docker/supervisord.conf /etc/supervisord.conf
-COPY --from=builder /app/schema.prisma /app/
+COPY --from=builder --chmod=0644 /app/requirements.txt /app/requirements.txt
+COPY --from=builder --chmod=0755 /app/docker/entrypoint.sh /app/docker/prod_entrypoint.sh /app/docker/
+COPY --from=builder --chmod=0644 /app/docker/supervisord.conf /etc/supervisord.conf
+COPY --from=builder --chmod=0644 /app/schema.prisma /app/
 # Copy prisma_migration.py for Helm migrations job compatibility
-COPY --from=builder /app/litellm/proxy/prisma_migration.py /app/litellm/proxy/prisma_migration.py
+COPY --from=builder --chmod=0644 /app/litellm/proxy/prisma_migration.py /app/litellm/proxy/prisma_migration.py
 COPY --from=builder /wheels/ /wheels/
 COPY --from=builder /var/lib/litellm/ui /var/lib/litellm/ui
 COPY --from=builder /var/lib/litellm/assets /var/lib/litellm/assets
@@ -220,6 +220,20 @@ USER nobody
 
 # Generate Prisma client as nobody user to ensure correct file ownership
 RUN prisma generate
+
+# Compose and Kubernetes may override USER, so runtime files must be readable by
+# arbitrary UIDs regardless of the build host's umask.
+USER root
+RUN chmod 0755 /app/docker/entrypoint.sh /app/docker/prod_entrypoint.sh && \
+    chmod 0644 /app/requirements.txt /app/schema.prisma \
+        /app/litellm/proxy/prisma_migration.py /etc/supervisord.conf && \
+    chmod -R a+rX /app /var/lib/litellm /usr/lib/python3.13/site-packages && \
+    UNREADABLE="$(find /app /var/lib/litellm /usr/lib/python3.13/site-packages \
+        -type f ! -perm -0004 -print -quit)" && \
+    [ -z "$UNREADABLE" ] || \
+        { echo "Runtime file is not readable by arbitrary UIDs: $UNREADABLE"; exit 1; }
+
+USER nobody
 
 # Prisma runtime knobs for offline containers
 ENV PRISMA_SKIP_POSTINSTALL_GENERATE=1 \
