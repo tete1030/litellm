@@ -14,6 +14,7 @@ import pytest
 
 sys.path.insert(0, os.path.abspath("../../../../.."))
 
+from litellm.exceptions import UnsupportedParamsError
 from litellm.llms.chatgpt.responses.transformation import ChatGPTResponsesAPIConfig
 from litellm.types.router import GenericLiteLLMParams
 from litellm.types.utils import LlmProviders
@@ -42,9 +43,7 @@ class TestChatGPTResponsesAPITransformation:
         assert isinstance(config, ChatGPTResponsesAPIConfig)
         assert config.custom_llm_provider == LlmProviders.CHATGPT
 
-    @patch(
-        "litellm.llms.chatgpt.responses.transformation.get_chatgpt_authenticator"
-    )
+    @patch("litellm.llms.chatgpt.responses.transformation.get_chatgpt_authenticator")
     def test_chatgpt_responses_endpoint_url(self, mock_get_chatgpt_authenticator):
         mock_auth_instance = MagicMock()
         mock_auth_instance.get_api_base.return_value = "https://chatgpt.example.com"
@@ -66,9 +65,7 @@ class TestChatGPTResponsesAPITransformation:
         assert url_with_slash == "https://chatgpt.example.com/responses"
         mock_get_chatgpt_authenticator.assert_called_with({})
 
-    @patch(
-        "litellm.llms.chatgpt.responses.transformation.get_chatgpt_authenticator"
-    )
+    @patch("litellm.llms.chatgpt.responses.transformation.get_chatgpt_authenticator")
     def test_validate_environment_headers(self, mock_get_chatgpt_authenticator):
         mock_auth_instance = MagicMock()
         mock_auth_instance.get_access_token.return_value = "access-123"
@@ -93,9 +90,59 @@ class TestChatGPTResponsesAPITransformation:
         assert headers["session_id"] == "session-123"
         mock_get_chatgpt_authenticator.assert_called_with(litellm_params)
 
-    @patch(
-        "litellm.llms.chatgpt.responses.transformation.get_chatgpt_authenticator"
+    @patch("litellm.llms.chatgpt.responses.transformation.get_chatgpt_authenticator")
+    def test_validate_environment_forwards_codex_user_agent(
+        self, mock_get_chatgpt_authenticator
+    ):
+        mock_auth_instance = MagicMock()
+        mock_auth_instance.get_access_token.return_value = "access-123"
+        mock_auth_instance.get_account_id.return_value = "acct-123"
+        mock_get_chatgpt_authenticator.return_value = mock_auth_instance
+
+        config = ChatGPTResponsesAPIConfig()
+        headers = config.validate_environment(
+            headers={},
+            model="gpt-5.6-sol",
+            litellm_params=cast(
+                GenericLiteLLMParams,
+                {
+                    "metadata": {
+                        "user_agent": "codex_cli_rs/0.144.1 (Linux 6; x86_64) unknown"
+                    }
+                },
+            ),
+        )
+
+        assert headers["user-agent"] == "codex_cli_rs/0.144.1 (Linux 6; x86_64) unknown"
+
+    @patch.dict(
+        os.environ,
+        {"CHATGPT_CODEX_CLIENT_VERSION": "0.144.1"},
+        clear=False,
     )
+    @patch("litellm.llms.chatgpt.responses.transformation.get_chatgpt_authenticator")
+    def test_validate_environment_replaces_non_codex_user_agent(
+        self, mock_get_chatgpt_authenticator
+    ):
+        mock_auth_instance = MagicMock()
+        mock_auth_instance.get_access_token.return_value = "access-123"
+        mock_auth_instance.get_account_id.return_value = "acct-123"
+        mock_get_chatgpt_authenticator.return_value = mock_auth_instance
+
+        config = ChatGPTResponsesAPIConfig()
+        headers = config.validate_environment(
+            headers={"User-Agent": "opencode/1.2.3"},
+            model="gpt-5.6-sol",
+            litellm_params=cast(
+                GenericLiteLLMParams,
+                {"metadata": {"user_agent": "opencode/1.2.3"}},
+            ),
+        )
+
+        assert headers["user-agent"].startswith("codex_cli_rs/0.144.1 ")
+        assert "User-Agent" not in headers
+
+    @patch("litellm.llms.chatgpt.responses.transformation.get_chatgpt_authenticator")
     def test_validate_environment_uses_profile_specific_authenticator(
         self, mock_get_chatgpt_authenticator
     ):
@@ -123,9 +170,7 @@ class TestChatGPTResponsesAPITransformation:
         assert headers["ChatGPT-Account-Id"] == "acct-profile"
         mock_get_chatgpt_authenticator.assert_called_with(litellm_params)
 
-    @patch(
-        "litellm.llms.chatgpt.responses.transformation.get_chatgpt_authenticator"
-    )
+    @patch("litellm.llms.chatgpt.responses.transformation.get_chatgpt_authenticator")
     def test_validate_environment_overrides_lowercase_protected_headers(
         self, mock_get_chatgpt_authenticator
     ):
@@ -175,9 +220,7 @@ class TestChatGPTResponsesAPITransformation:
 
         assert request["stream"] is True
         assert "reasoning.encrypted_content" in request["include"]
-        assert request["instructions"].startswith(
-            "You are Codex, based on GPT-5."
-        )
+        assert request["instructions"].startswith("You are Codex, based on GPT-5.")
 
     @pytest.mark.parametrize(
         "model_name",
@@ -196,7 +239,9 @@ class TestChatGPTResponsesAPITransformation:
                 "user": "user_123",
                 "temperature": 0.2,
                 "top_p": 0.9,
-                "context_management": [{"type": "compaction", "compact_threshold": 200000}],
+                "context_management": [
+                    {"type": "compaction", "compact_threshold": 200000}
+                ],
                 "metadata": {"foo": "bar"},
                 "max_output_tokens": 123,
                 "stream_options": {"include_usage": True},
@@ -223,7 +268,10 @@ class TestChatGPTResponsesAPITransformation:
         assert request["previous_response_id"] == "resp_123"
         assert request["reasoning"] == {"effort": "medium"}
         assert request["tools"] == [{"type": "function", "function": {"name": "hello"}}]
-        assert request["tool_choice"] == {"type": "function", "function": {"name": "hello"}}
+        assert request["tool_choice"] == {
+            "type": "function",
+            "function": {"name": "hello"},
+        }
 
     def test_chatgpt_normalizes_fast_service_tier_to_priority(self):
         config = ChatGPTResponsesAPIConfig()
@@ -271,6 +319,75 @@ class TestChatGPTResponsesAPITransformation:
 
         assert "service_tier" not in request
 
+    def test_chatgpt_replaces_reasoning_effort_for_virtual_key(self):
+        config = ChatGPTResponsesAPIConfig()
+        litellm_params = GenericLiteLLMParams(
+            metadata={
+                "user_api_key_alias": "vk-reasoning",
+                "user_api_key_auth_metadata": {
+                    "chatgpt_reasoning_effort_policy": {
+                        "models": {
+                            "gpt-5.6-sol": {
+                                "levels": {
+                                    "max": {
+                                        "action": "replace",
+                                        "target": "xhigh",
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+            }
+        )
+
+        request = config.transform_responses_api_request(
+            model="chatgpt/gpt-5.6-sol",
+            input="hi",
+            response_api_optional_request_params={
+                "reasoning": {"effort": "max", "summary": "detailed"}
+            },
+            litellm_params=litellm_params,
+            headers={},
+        )
+
+        assert request["reasoning"] == {
+            "effort": "xhigh",
+            "summary": "detailed",
+        }
+        assert litellm_params.metadata["chatgpt_requested_reasoning_effort"] == "max"
+        assert (
+            litellm_params.metadata["chatgpt_effective_reasoning_effort"]
+            == "xhigh"
+        )
+
+    def test_chatgpt_rejects_reasoning_effort_for_virtual_key(self):
+        config = ChatGPTResponsesAPIConfig()
+        litellm_params = GenericLiteLLMParams(
+            metadata={
+                "user_api_key_auth_metadata": {
+                    "chatgpt_reasoning_effort_policy": {
+                        "models": {
+                            "gpt-5.6-sol": {
+                                "levels": {"ultra": {"action": "reject"}}
+                            }
+                        }
+                    }
+                }
+            }
+        )
+
+        with pytest.raises(UnsupportedParamsError, match="is not allowed"):
+            config.transform_responses_api_request(
+                model="chatgpt/gpt-5.6-sol",
+                input="hi",
+                response_api_optional_request_params={
+                    "reasoning": {"effort": "ultra"}
+                },
+                litellm_params=litellm_params,
+                headers={},
+            )
+
     @pytest.mark.parametrize(
         ("model_name", "response_model"),
         [
@@ -316,7 +433,9 @@ class TestChatGPTResponsesAPITransformation:
 
         assert parsed.output_text == "Hello!"
 
-    def test_chatgpt_non_stream_sse_uses_output_item_done_when_completed_output_empty(self):
+    def test_chatgpt_non_stream_sse_uses_output_item_done_when_completed_output_empty(
+        self,
+    ):
         config = ChatGPTResponsesAPIConfig()
         done_item = {
             "type": "message",

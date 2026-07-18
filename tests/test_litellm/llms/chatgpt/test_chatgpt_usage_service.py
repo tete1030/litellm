@@ -81,9 +81,12 @@ def test_extract_account_metadata_parses_accounts_check_v4_payload() -> None:
         }
     }
 
-    account_type, has_active_subscription, expires_at, renews_at = _extract_account_metadata(
-        payload, account_id=""
-    )
+    (
+        account_type,
+        has_active_subscription,
+        expires_at,
+        renews_at,
+    ) = _extract_account_metadata(payload, account_id="")
 
     assert account_type == "prolite"
     assert has_active_subscription is True
@@ -110,7 +113,10 @@ def test_fetch_usage_for_profile_applies_accounts_metadata_to_availability() -> 
 
     with patch(
         "litellm.llms.chatgpt.usage_service._load_auth_data",
-        return_value=(authenticator, {"account_id": "acct_buy10", "access_token": "token"}),
+        return_value=(
+            authenticator,
+            {"account_id": "acct_buy10", "access_token": "token"},
+        ),
     ), patch(
         "litellm.llms.chatgpt.usage_service._get_usage_access_token",
         return_value="token",
@@ -130,7 +136,9 @@ def test_fetch_usage_for_profile_applies_accounts_metadata_to_availability() -> 
     assert result.effective_available is False
 
 
-def test_fetch_rate_limit_reset_credits_for_profile_returns_error_result_on_auth_failure() -> None:
+def test_fetch_rate_limit_reset_credits_for_profile_returns_error_result_on_auth_failure() -> (
+    None
+):
     authenticator = MagicMock()
     authenticator.get_account_id.return_value = "acct_buy4"
 
@@ -163,7 +171,9 @@ def test_fetch_rate_limit_reset_credits_for_profile_returns_error_result_on_auth
     )
 
 
-def test_fetch_rate_limit_reset_credits_for_profile_parses_available_count_and_credits() -> None:
+def test_fetch_rate_limit_reset_credits_for_profile_parses_available_count_and_credits() -> (
+    None
+):
     authenticator = MagicMock()
     authenticator.get_account_id.return_value = "acct_buy10"
 
@@ -186,7 +196,10 @@ def test_fetch_rate_limit_reset_credits_for_profile_parses_available_count_and_c
 
     with patch(
         "litellm.llms.chatgpt.usage_service._load_auth_data",
-        return_value=(authenticator, {"account_id": "acct_buy10", "access_token": "token"}),
+        return_value=(
+            authenticator,
+            {"account_id": "acct_buy10", "access_token": "token"},
+        ),
     ), patch(
         "litellm.llms.chatgpt.usage_service._get_usage_access_token",
         return_value="token",
@@ -207,6 +220,8 @@ def test_fetch_rate_limit_reset_credits_for_profile_parses_available_count_and_c
     request_headers = client.get.call_args.kwargs["headers"]
     assert request_headers["Authorization"] == "Bearer token"
     assert request_headers["ChatGPT-Account-Id"] == "acct_buy10"
+    assert request_headers["originator"] == "codex_cli_rs"
+    assert request_headers["User-Agent"].startswith("codex_cli_rs/")
 
 
 def test_select_rate_limit_reset_credit_id_prefers_earliest_available_expiry() -> None:
@@ -254,7 +269,10 @@ def test_consume_rate_limit_reset_credit_for_profile_posts_expected_payload() ->
 
     with patch(
         "litellm.llms.chatgpt.usage_service._load_auth_data",
-        return_value=(authenticator, {"account_id": "acct_buy10", "access_token": "token"}),
+        return_value=(
+            authenticator,
+            {"account_id": "acct_buy10", "access_token": "token"},
+        ),
     ), patch(
         "litellm.llms.chatgpt.usage_service._get_usage_access_token",
         return_value="token",
@@ -281,7 +299,9 @@ def test_consume_rate_limit_reset_credit_for_profile_posts_expected_payload() ->
     assert request_kwargs["headers"]["Content-Type"] == "application/json"
 
 
-def test_consume_rate_limit_reset_credit_for_profile_marks_business_error_code_as_error() -> None:
+def test_consume_rate_limit_reset_credit_for_profile_marks_business_error_code_as_error() -> (
+    None
+):
     authenticator = MagicMock()
     authenticator.get_account_id.return_value = "acct_buy10"
 
@@ -299,7 +319,10 @@ def test_consume_rate_limit_reset_credit_for_profile_marks_business_error_code_a
 
     with patch(
         "litellm.llms.chatgpt.usage_service._load_auth_data",
-        return_value=(authenticator, {"account_id": "acct_buy10", "access_token": "token"}),
+        return_value=(
+            authenticator,
+            {"account_id": "acct_buy10", "access_token": "token"},
+        ),
     ), patch(
         "litellm.llms.chatgpt.usage_service._get_usage_access_token",
         return_value="token",
@@ -319,7 +342,9 @@ def test_consume_rate_limit_reset_credit_for_profile_marks_business_error_code_a
     assert result.error == "This reset credit has already been redeemed."
 
 
-def test_compute_chatgpt_pacing_info_prefers_weekly_window_and_earliest_deadline() -> None:
+def test_compute_chatgpt_pacing_info_prefers_weekly_window_and_earliest_deadline() -> (
+    None
+):
     result = normalize_usage_payload(
         profile="buy2",
         account_id="acct-buy2",
@@ -443,7 +468,9 @@ def test_build_codex_rate_limit_error_for_exhausted_weekly_window() -> None:
     assert error.headers["x-weekly-limit-primary-reset-at"] == "1700600000"
 
 
-def test_build_codex_rate_limit_error_for_free_profile_returns_usage_not_included() -> None:
+def test_build_codex_rate_limit_error_for_free_profile_returns_usage_not_included() -> (
+    None
+):
     result = normalize_usage_payload(
         profile="free-profile",
         account_id="acct-free",

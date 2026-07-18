@@ -1,3 +1,4 @@
+import os
 from unittest.mock import MagicMock, patch
 
 from litellm.llms.chatgpt.chat.transformation import ChatGPTConfig
@@ -67,6 +68,33 @@ class TestChatGPTTransformation:
         assert headers["originator"] == "custom-origin"
         assert "authorization" not in headers
         assert "chatgpt-account-id" not in headers
+
+    @patch.dict(
+        os.environ,
+        {"CHATGPT_CODEX_CLIENT_VERSION": "0.144.1"},
+        clear=False,
+    )
+    @patch("litellm.llms.chatgpt.chat.transformation.get_chatgpt_authenticator")
+    def test_validate_environment_uses_default_user_agent_when_missing(
+        self, mock_get_chatgpt_authenticator
+    ):
+        mock_authenticator = MagicMock()
+        mock_authenticator.get_access_token.return_value = "access-123"
+        mock_authenticator.get_account_id.return_value = "acct-123"
+        mock_get_chatgpt_authenticator.return_value = mock_authenticator
+
+        config = ChatGPTConfig()
+        headers = config.validate_environment(
+            headers={},
+            model="chatgpt/gpt-5.6-sol",
+            messages=[{"role": "user", "content": "hello"}],
+            optional_params={},
+            litellm_params={},
+            api_key="placeholder-key",
+            api_base=None,
+        )
+
+        assert headers["user-agent"].startswith("codex_cli_rs/0.144.1 ")
 
     @patch("litellm.llms.chatgpt.chat.transformation.get_chatgpt_authenticator")
     def test_provider_info_uses_profile_specific_authenticator(
@@ -138,3 +166,33 @@ class TestChatGPTTransformation:
         )
 
         assert "service_tier" not in request
+
+    def test_transform_request_replaces_reasoning_effort_for_virtual_key(self):
+        config = ChatGPTConfig()
+
+        request = config.transform_request(
+            model="chatgpt/gpt-5.6-sol",
+            messages=[{"role": "user", "content": "hello"}],
+            optional_params={"reasoning_effort": "max"},
+            litellm_params={
+                "metadata": {
+                    "user_api_key_auth_metadata": {
+                        "chatgpt_reasoning_effort_policy": {
+                            "models": {
+                                "gpt-5.6-sol": {
+                                    "levels": {
+                                        "max": {
+                                            "action": "replace",
+                                            "target": "xhigh",
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            headers={},
+        )
+
+        assert request["reasoning_effort"] == "xhigh"

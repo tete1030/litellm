@@ -2126,6 +2126,109 @@ async def test_proxy_model_group_alias_checks(prisma_client, hidden):
 
 
 @pytest.mark.asyncio
+async def test_proxy_model_list_returns_codex_catalog_for_client_version(monkeypatch):
+    from litellm.llms.chatgpt import model_catalog as chatgpt_model_catalog
+    from litellm.proxy.proxy_server import model_list
+
+    _model_list = [
+        {
+            "model_name": "gpt-5.6-sol",
+            "litellm_params": {
+                "model": "chatgpt/gpt-5.6-sol",
+                "chatgpt_auth_profile": "my",
+            },
+            "model_info": {
+                "mode": "responses",
+                "supports_reasoning": True,
+                "supports_service_tier": True,
+                "supports_web_search": True,
+                "supports_xhigh_reasoning_effort": True,
+                "supports_max_reasoning_effort": True,
+                "supports_ultra_reasoning_effort": True,
+                "supported_modalities": ["text", "image"],
+            },
+        }
+    ]
+    router = litellm.Router(model_list=_model_list)
+    monkeypatch.setattr(litellm.proxy.proxy_server, "llm_router", router)
+    monkeypatch.setattr(litellm.proxy.proxy_server, "llm_model_list", _model_list)
+    monkeypatch.setattr(litellm.proxy.proxy_server, "general_settings", {})
+
+    upstream_models = [
+        {
+            "slug": "gpt-5.6-sol",
+            "display_name": "GPT-5.6-Sol",
+            "service_tiers": [{"id": "priority"}],
+            "tool_mode": "code_mode_only",
+            "multi_agent_version": "v2",
+            "use_responses_lite": True,
+            "supported_reasoning_levels": [
+                {"effort": effort}
+                for effort in ["low", "medium", "high", "xhigh", "max", "ultra"]
+            ],
+        },
+        {
+            "slug": "gpt-5.6-luna",
+            "multi_agent_version": "v1",
+            "supported_reasoning_levels": [
+                {"effort": effort}
+                for effort in ["low", "medium", "high", "xhigh", "max"]
+            ],
+        },
+    ]
+
+    async def _get_catalog(client_version, profiles):
+        assert client_version == "0.144.1"
+        assert profiles == ["my"]
+        return upstream_models
+
+    monkeypatch.setattr(
+        chatgpt_model_catalog, "get_chatgpt_model_catalog", _get_catalog
+    )
+
+    openai_compatible_resp = await model_list(
+        user_api_key_dict=UserAPIKeyAuth(models=[]),
+    )
+    assert "data" in openai_compatible_resp
+    assert "models" not in openai_compatible_resp
+
+    codex_resp = await model_list(
+        user_api_key_dict=UserAPIKeyAuth(
+            models=[],
+            metadata={
+                "chatgpt_reasoning_effort_policy": {
+                    "models": {
+                        "gpt-5.6-sol": {
+                            "levels": {
+                                "max": {
+                                    "action": "replace",
+                                    "target": "xhigh",
+                                },
+                                "ultra": {"action": "reject"},
+                            }
+                        }
+                    }
+                }
+            },
+        ),
+        client_version="0.144.1",
+    )
+
+    assert "models" in codex_resp
+    assert "data" not in codex_resp
+    model = codex_resp["models"][0]
+    assert model["slug"] == "gpt-5.6-sol"
+    assert model["display_name"] == "GPT-5.6-Sol"
+    assert model["service_tiers"][0]["id"] == "priority"
+    assert model["tool_mode"] == "code_mode_only"
+    assert model["multi_agent_version"] == "v2"
+    assert model["use_responses_lite"] is True
+    efforts = [item["effort"] for item in model["supported_reasoning_levels"]]
+    assert efforts == ["low", "medium", "high", "xhigh", "max"]
+    assert all(model["slug"] != "gpt-5.6-luna" for model in codex_resp["models"])
+
+
+@pytest.mark.asyncio
 @pytest.mark.skip(reason="Requires reliable external DB connection (prisma).")
 async def test_proxy_model_group_info_rerank(prisma_client):
     """

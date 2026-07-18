@@ -5771,6 +5771,25 @@ def _get_model_info_helper(  # noqa: PLR0915
                 supports_web_search=_model_info.get("supports_web_search", None),
                 supports_url_context=_model_info.get("supports_url_context", None),
                 supports_reasoning=_model_info.get("supports_reasoning", None),
+                supports_service_tier=_model_info.get("supports_service_tier", None),
+                supports_none_reasoning_effort=_model_info.get(
+                    "supports_none_reasoning_effort", None
+                ),
+                supports_minimal_reasoning_effort=_model_info.get(
+                    "supports_minimal_reasoning_effort", None
+                ),
+                supports_low_reasoning_effort=_model_info.get(
+                    "supports_low_reasoning_effort", None
+                ),
+                supports_xhigh_reasoning_effort=_model_info.get(
+                    "supports_xhigh_reasoning_effort", None
+                ),
+                supports_max_reasoning_effort=_model_info.get(
+                    "supports_max_reasoning_effort", None
+                ),
+                supports_ultra_reasoning_effort=_model_info.get(
+                    "supports_ultra_reasoning_effort", None
+                ),
                 supports_computer_use=_model_info.get("supports_computer_use", None),
                 search_context_cost_per_query=_model_info.get(
                     "search_context_cost_per_query", None

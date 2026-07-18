@@ -135,9 +135,14 @@ class ProviderSpecificModelInfo(TypedDict, total=False):
     supports_parallel_function_calling: Optional[bool]
     supports_web_search: Optional[bool]
     supports_reasoning: Optional[bool]
+    supports_service_tier: Optional[bool]
     supports_url_context: Optional[bool]
     supports_none_reasoning_effort: Optional[bool]
+    supports_minimal_reasoning_effort: Optional[bool]
+    supports_low_reasoning_effort: Optional[bool]
     supports_xhigh_reasoning_effort: Optional[bool]
+    supports_max_reasoning_effort: Optional[bool]
+    supports_ultra_reasoning_effort: Optional[bool]
 
 
 class SearchContextCostPerQuery(TypedDict, total=False):
@@ -2592,6 +2597,11 @@ class StandardLoggingMetadata(StandardLoggingUserAPIKeyMetadata):
     chatgpt_profile_allow_fast_mode: Optional[bool]
     chatgpt_virtual_key_allow_fast_mode: Optional[bool]
     chatgpt_fast_mode_allowed: Optional[bool]
+    chatgpt_requested_reasoning_effort: Optional[str]
+    chatgpt_effective_reasoning_effort: Optional[str]
+    chatgpt_reasoning_effort_action: Optional[str]
+    chatgpt_reasoning_effort_policy_source: Optional[str]
+    chatgpt_reasoning_effort_policy_applied: Optional[bool]
     team_alias: Optional[str]
     team_id: Optional[str]
 

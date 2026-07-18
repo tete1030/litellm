@@ -864,6 +864,29 @@ async def proxy_startup_event(app: FastAPI):  # noqa: PLR0915
             if isinstance(worker_config, dict):
                 await initialize(**worker_config)
 
+    if llm_router is not None:
+        try:
+            from litellm.llms.chatgpt.model_catalog import (
+                get_chatgpt_profiles_for_models,
+                warm_chatgpt_model_catalog,
+            )
+
+            router_model_names = llm_router.get_model_names()
+            chatgpt_profiles = get_chatgpt_profiles_for_models(
+                router_model_names, llm_router
+            )
+            if chatgpt_profiles:
+                await warm_chatgpt_model_catalog(chatgpt_profiles)
+                verbose_proxy_logger.info(
+                    "Warmed ChatGPT Codex model catalog for profiles: %s",
+                    chatgpt_profiles,
+                )
+        except Exception as exc:
+            verbose_proxy_logger.warning(
+                "Unable to warm ChatGPT Codex model catalog during startup: %s",
+                exc,
+            )
+
     # check if DATABASE_URL in environment - load from there
     if prisma_client is None:
         _db_url: Optional[str] = get_secret("DATABASE_URL", None)  # type: ignore
@@ -6540,6 +6563,8 @@ async def model_list(
     include_metadata: Optional[bool] = False,
     fallback_type: Optional[str] = None,
     scope: Optional[str] = None,
+    client_version: Optional[str] = None,
+    codex_catalog: Optional[bool] = False,
 ):
     """
     Use `/model/info` - to get detailed model information, example - pricing, mode, etc.
@@ -6563,6 +6588,38 @@ async def model_list(
         create_model_info_response,
         get_available_models_for_user,
     )
+
+    async def _get_codex_catalog(allowed_models: List[str]) -> dict:
+        from litellm.llms.chatgpt.model_catalog import (
+            ChatGPTModelCatalogError,
+            filter_chatgpt_model_catalog,
+            get_chatgpt_model_catalog,
+            get_chatgpt_profiles_for_models,
+            normalize_codex_client_version,
+        )
+        from litellm.llms.chatgpt.reasoning_effort_policy import (
+            ChatGPTReasoningEffortPolicyConfigError,
+        )
+
+        try:
+            resolved_version = normalize_codex_client_version(client_version)
+            profiles = get_chatgpt_profiles_for_models(allowed_models, llm_router)
+            upstream_models = await get_chatgpt_model_catalog(
+                resolved_version, profiles
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ChatGPTModelCatalogError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        try:
+            filtered_models = filter_chatgpt_model_catalog(
+                upstream_models,
+                allowed_models,
+                virtual_key_metadata=user_api_key_dict.metadata,
+            )
+        except ChatGPTReasoningEffortPolicyConfigError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"models": filtered_models}
 
     # Validate scope parameter if provided
     if scope is not None and scope != "expand":
@@ -6613,6 +6670,9 @@ async def model_list(
             only_model_access_groups=only_model_access_groups or False,
         )
 
+        if client_version is not None or codex_catalog:
+            return await _get_codex_catalog(all_models)
+
         # Build response data with all proxy models
         model_data = []
         for model in all_models:
@@ -6645,6 +6705,9 @@ async def model_list(
         return_wildcard_routes=return_wildcard_routes or False,
         user_api_key_cache=user_api_key_cache,
     )
+
+    if client_version is not None or codex_catalog:
+        return await _get_codex_catalog(all_models)
 
     # Build response data
     model_data = []

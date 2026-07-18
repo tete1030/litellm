@@ -954,6 +954,10 @@ class LiteLLMResponsesTransformationHandler(CompletionTransformationBridge):
             )
         elif reasoning_effort == "xhigh":
             return Reasoning(effort="xhigh", summary="detailed") if auto_summary_enabled else Reasoning(effort="xhigh")  # type: ignore[typeddict-item]
+        elif reasoning_effort == "max":
+            return Reasoning(effort="max", summary="detailed") if auto_summary_enabled else Reasoning(effort="max")  # type: ignore[typeddict-item]
+        elif reasoning_effort == "ultra":
+            return Reasoning(effort="ultra", summary="detailed") if auto_summary_enabled else Reasoning(effort="ultra")  # type: ignore[typeddict-item]
         elif reasoning_effort == "medium":
             return (
                 Reasoning(effort="medium", summary="detailed")

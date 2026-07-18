@@ -82,6 +82,24 @@ def test_transform_response_format_to_text_format_none():
     assert result is None
 
 
+def test_reasoning_effort_max_maps_to_responses_reasoning():
+    handler = LiteLLMResponsesTransformationHandler()
+
+    reasoning = handler._map_reasoning_effort("max")
+
+    assert reasoning is not None
+    assert reasoning["effort"] == "max"
+
+
+def test_reasoning_effort_ultra_maps_to_responses_reasoning():
+    handler = LiteLLMResponsesTransformationHandler()
+
+    reasoning = handler._map_reasoning_effort("ultra")
+
+    assert reasoning is not None
+    assert reasoning["effort"] == "ultra"
+
+
 def test_transform_request_with_response_format():
     """Test that transform_request correctly handles response_format parameter"""
     handler = LiteLLMResponsesTransformationHandler()

@@ -789,3 +789,32 @@ def test_gpt5_1_logprobs_dropped_with_reasoning_effort(config: OpenAIConfig):
     assert "logprobs" not in params
     assert "top_p" not in params
     assert params["reasoning_effort"] == "high"
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "gpt-5.6",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "openai/gpt-5.6-sol",
+    ],
+)
+def test_gpt5_6_models_are_gpt5_4_plus(gpt5_config: OpenAIGPT5Config, model: str):
+    assert gpt5_config.is_model_gpt_5_model(model)
+    assert gpt5_config.is_model_gpt_5_4_plus_model(model)
+
+
+@pytest.mark.parametrize(
+    "model",
+    ["gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
+)
+def test_gpt5_6_allows_reasoning_effort_max(config: OpenAIConfig, model: str):
+    params = config.map_openai_params(
+        non_default_params={"reasoning_effort": "max"},
+        optional_params={},
+        model=model,
+        drop_params=False,
+    )
+    assert params["reasoning_effort"] == "max"

@@ -13,13 +13,19 @@ from litellm.llms.base_llm.chat.transformation import BaseLLMException
 from litellm.llms.custom_httpx.http_handler import _get_httpx_client
 
 from .authenticator import get_chatgpt_authenticator
-from .common_utils import ChatGPTAuthError
+from .common_utils import (
+    ChatGPTAuthError,
+    get_chatgpt_originator,
+    get_chatgpt_user_agent,
+)
 
 DEFAULT_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 DEFAULT_RATE_LIMIT_RESET_CREDITS_URL = (
     "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
 )
-DEFAULT_ACCOUNTS_CHECK_URL = "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27"
+DEFAULT_ACCOUNTS_CHECK_URL = (
+    "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27"
+)
 
 
 @dataclass
@@ -182,7 +188,9 @@ class ChatGPTUsageMetrics:
         self._known_windows: set[tuple[str, str]] = set()
         self._known_plan_labels: set[tuple[str, str]] = set()
 
-    def update(self, results: List[UsageResult], refreshed_at: Optional[float] = None) -> None:
+    def update(
+        self, results: List[UsageResult], refreshed_at: Optional[float] = None
+    ) -> None:
         refreshed_at = refreshed_at or time.time()
         self.refresh_timestamp.set(refreshed_at)
         self.refresh_success.set(1)
@@ -198,7 +206,9 @@ class ChatGPTUsageMetrics:
             self.profile_up.labels(profile=profile).set(1 if is_ok else 0)
 
             effective_available = _effective_available_from_result(result)
-            self.profile_available.labels(profile=profile).set(1 if effective_available else 0)
+            self.profile_available.labels(profile=profile).set(
+                1 if effective_available else 0
+            )
 
             account_type = _sanitize_account_type(result.account_type or result.plan)
             plan_label_key = (profile, account_type)
@@ -244,19 +254,25 @@ class ChatGPTUsageMetrics:
                     if window.reset_at is not None
                     else float("nan")
                 )
-                self.window_used_percent.labels(profile=profile, window=window.label).set(
-                    window.used_percent
-                )
+                self.window_used_percent.labels(
+                    profile=profile, window=window.label
+                ).set(window.used_percent)
                 self.window_used_ratio.labels(profile=profile, window=window.label).set(
                     window.used_percent / 100.0
                 )
-                self.window_limit_seconds.labels(profile=profile, window=window.label).set(
+                self.window_limit_seconds.labels(
+                    profile=profile, window=window.label
+                ).set(
                     window.limit_seconds
                     if window.limit_seconds is not None
                     else float("nan")
                 )
-                self.window_reset_timestamp.labels(profile=profile, window=window.label).set(
-                    float(window.reset_at) if window.reset_at is not None else float("nan")
+                self.window_reset_timestamp.labels(
+                    profile=profile, window=window.label
+                ).set(
+                    float(window.reset_at)
+                    if window.reset_at is not None
+                    else float("nan")
                 )
                 self.window_remaining_seconds.labels(
                     profile=profile, window=window.label
@@ -352,7 +368,9 @@ class ChatGPTRateLimitResetCreditsMetrics:
         for result in results:
             profile = result.profile
             active_profiles.add(profile)
-            self.profile_up.labels(profile=profile).set(1 if result.status == "ok" else 0)
+            self.profile_up.labels(profile=profile).set(
+                1 if result.status == "ok" else 0
+            )
             self.profile_available_count.labels(profile=profile).set(
                 result.available_count
                 if result.available_count is not None
@@ -385,7 +403,9 @@ class ChatGPTRateLimitResetCreditsMetrics:
             self.profile_credit_count.remove(profile)
             self.profile_next_expires_timestamp.remove(profile)
 
-        for profile, credit_id, status in self._known_credit_labels - active_credit_labels:
+        for profile, credit_id, status in (
+            self._known_credit_labels - active_credit_labels
+        ):
             self.credit_expires_timestamp.remove(profile, credit_id, status)
 
         self._known_profiles = active_profiles
@@ -828,11 +848,12 @@ def _extract_account_metadata(
             account_type = _sanitize_account_type(candidate_account_type)
 
         if isinstance(entitlement_block, dict):
-            if (
-                has_active_subscription is None
-                and isinstance(entitlement_block.get("has_active_subscription"), bool)
+            if has_active_subscription is None and isinstance(
+                entitlement_block.get("has_active_subscription"), bool
             ):
-                has_active_subscription = entitlement_block.get("has_active_subscription")
+                has_active_subscription = entitlement_block.get(
+                    "has_active_subscription"
+                )
 
             if subscription_expires_at is None:
                 subscription_expires_at = _parse_optional_timestamp(
@@ -844,13 +865,10 @@ def _extract_account_metadata(
                     entitlement_block.get("renews_at")
                 )
 
-        if (
-            account_type is not None
-            and (
-                has_active_subscription is not None
-                or subscription_expires_at is not None
-                or subscription_renews_at is not None
-            )
+        if account_type is not None and (
+            has_active_subscription is not None
+            or subscription_expires_at is not None
+            or subscription_renews_at is not None
         ):
             break
 
@@ -907,9 +925,11 @@ def _build_chatgpt_api_headers(
     *,
     content_type_json: bool = False,
 ) -> Dict[str, str]:
+    originator = get_chatgpt_originator()
     headers = {
         "Authorization": f"Bearer {access_token}",
-        "User-Agent": "litellm-chatgpt",
+        "User-Agent": get_chatgpt_user_agent(originator),
+        "originator": originator,
         "Accept": "application/json",
     }
     if account_id:
@@ -1106,7 +1126,9 @@ def _fetch_account_metadata(
     return _extract_account_metadata(payload, account_id)
 
 
-def fetch_usage_for_profile(profile: str, usage_url: Optional[str] = None) -> UsageResult:
+def fetch_usage_for_profile(
+    profile: str, usage_url: Optional[str] = None
+) -> UsageResult:
     account_id = ""
     try:
         authenticator, auth_data = _load_auth_data(profile)
@@ -1253,10 +1275,9 @@ def consume_rate_limit_reset_credit_for_profile(
         )
 
     client = _get_httpx_client()
-    endpoint = (
-        (reset_credits_url or get_rate_limit_reset_credits_url()).rstrip("/")
-        + "/consume"
-    )
+    endpoint = (reset_credits_url or get_rate_limit_reset_credits_url()).rstrip(
+        "/"
+    ) + "/consume"
     response = client.post(
         endpoint,
         headers=_build_chatgpt_api_headers(
@@ -1323,13 +1344,18 @@ class ChatGPTUsageService:
     def ensure_background_refresh_task(self) -> None:
         if not self._known_profiles:
             return
-        if self._background_refresh_task is not None and not self._background_refresh_task.done():
+        if (
+            self._background_refresh_task is not None
+            and not self._background_refresh_task.done()
+        ):
             return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        self._background_refresh_task = loop.create_task(self._background_refresh_loop())
+        self._background_refresh_task = loop.create_task(
+            self._background_refresh_loop()
+        )
 
     async def get_snapshot(
         self, profile: str, *, allow_stale: bool = True

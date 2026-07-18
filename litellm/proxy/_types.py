@@ -3253,6 +3253,11 @@ class SpendLogsMetadata(TypedDict):
     chatgpt_profile_allow_fast_mode: Optional[bool]
     chatgpt_virtual_key_allow_fast_mode: Optional[bool]
     chatgpt_fast_mode_allowed: Optional[bool]
+    chatgpt_requested_reasoning_effort: Optional[str]
+    chatgpt_effective_reasoning_effort: Optional[str]
+    chatgpt_reasoning_effort_action: Optional[str]
+    chatgpt_reasoning_effort_policy_source: Optional[str]
+    chatgpt_reasoning_effort_policy_applied: Optional[bool]
     litellm_overhead_time_ms: Optional[float]  # LiteLLM overhead time in milliseconds
     attempted_retries: Optional[
         int

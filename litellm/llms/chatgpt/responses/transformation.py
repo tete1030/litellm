@@ -25,8 +25,10 @@ from ..common_utils import (
     ensure_chatgpt_session_id,
     get_chatgpt_default_headers,
     get_chatgpt_default_instructions,
+    get_chatgpt_request_user_agent,
     merge_chatgpt_headers,
 )
+from ..reasoning_effort_policy import enforce_chatgpt_reasoning_effort_policy
 
 
 class ChatGPTResponsesAPIConfig(OpenAIResponsesAPIConfig):
@@ -56,7 +58,10 @@ class ChatGPTResponsesAPIConfig(OpenAIResponsesAPIConfig):
         account_id = authenticator.get_account_id()
         session_id = ensure_chatgpt_session_id(litellm_params)
         default_headers = get_chatgpt_default_headers(
-            access_token, account_id, session_id
+            access_token,
+            account_id,
+            session_id,
+            user_agent=get_chatgpt_request_user_agent(litellm_params),
         )
         protected_header_keys = {
             "Authorization",
@@ -64,6 +69,7 @@ class ChatGPTResponsesAPIConfig(OpenAIResponsesAPIConfig):
             "session_id",
             "content-type",
             "accept",
+            "user-agent",
         }
         return merge_chatgpt_headers(
             headers=headers,
@@ -102,6 +108,11 @@ class ChatGPTResponsesAPIConfig(OpenAIResponsesAPIConfig):
             include.append("reasoning.encrypted_content")
         request["include"] = include
         request = apply_chatgpt_service_tier_policy(request, litellm_params)
+        request = enforce_chatgpt_reasoning_effort_policy(
+            request=request,
+            model=model,
+            litellm_params=litellm_params,
+        )
 
         allowed_keys = {
             "model",

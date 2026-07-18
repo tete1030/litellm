@@ -1163,6 +1163,11 @@ def test_get_spend_logs_metadata_preserves_chatgpt_fast_mode_metadata():
         "chatgpt_profile_allow_fast_mode": True,
         "chatgpt_virtual_key_allow_fast_mode": False,
         "chatgpt_fast_mode_allowed": False,
+        "chatgpt_requested_reasoning_effort": "max",
+        "chatgpt_effective_reasoning_effort": "xhigh",
+        "chatgpt_reasoning_effort_action": "replace",
+        "chatgpt_reasoning_effort_policy_source": "virtual_key",
+        "chatgpt_reasoning_effort_policy_applied": True,
     }
 
     result = _get_spend_logs_metadata(metadata=metadata)
@@ -1175,6 +1180,11 @@ def test_get_spend_logs_metadata_preserves_chatgpt_fast_mode_metadata():
     assert result["chatgpt_profile_allow_fast_mode"] is True
     assert result["chatgpt_virtual_key_allow_fast_mode"] is False
     assert result["chatgpt_fast_mode_allowed"] is False
+    assert result["chatgpt_requested_reasoning_effort"] == "max"
+    assert result["chatgpt_effective_reasoning_effort"] == "xhigh"
+    assert result["chatgpt_reasoning_effort_action"] == "replace"
+    assert result["chatgpt_reasoning_effort_policy_source"] == "virtual_key"
+    assert result["chatgpt_reasoning_effort_policy_applied"] is True
 
 
 def test_get_logging_payload_guardrail_info_when_no_standard_logging_payload():

@@ -194,6 +194,12 @@ async def test_async_log_success_event_tracks_chatgpt_fast_mode_tokens_from_stan
             "chatgpt_effective_service_tier": "default",
             "chatgpt_fast_mode_requested": True,
             "chatgpt_fast_mode_effective": False,
+            "chatgpt_requested_reasoning_effort": "max",
+            "chatgpt_effective_reasoning_effort": "xhigh",
+            "chatgpt_reasoning_effort_action": "replace",
+            "usage_object": {
+                "completion_tokens_details": {"reasoning_tokens": 7}
+            },
         }
     )
     kwargs = {
@@ -216,6 +222,7 @@ async def test_async_log_success_event_tracks_chatgpt_fast_mode_tokens_from_stan
     response_obj = MagicMock()
 
     prometheus_logger.chatgpt_fast_mode_metrics = MagicMock()
+    prometheus_logger.chatgpt_reasoning_effort_metrics = MagicMock()
     prometheus_logger.litellm_requests_metric = MagicMock()
     prometheus_logger.litellm_spend_metric = MagicMock()
     prometheus_logger.litellm_tokens_metric = MagicMock()
@@ -247,6 +254,17 @@ async def test_async_log_success_event_tracks_chatgpt_fast_mode_tokens_from_stan
         completion_tokens=10,
         total_tokens=30,
         virtual_key="test_alias",
+    )
+    prometheus_logger.chatgpt_reasoning_effort_metrics.observe_usage.assert_called_once_with(
+        model="gpt-5.5",
+        virtual_key="test_alias",
+        requested_effort="max",
+        effective_effort="xhigh",
+        action="replace",
+        prompt_tokens=20,
+        completion_tokens=10,
+        total_tokens=30,
+        reasoning_tokens=7,
     )
 
 

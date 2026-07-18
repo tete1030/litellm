@@ -191,6 +191,11 @@ def all_fields_present(standard_logging_metadata: StandardLoggingMetadata):
         ("chatgpt_profile_allow_fast_mode", True),
         ("chatgpt_virtual_key_allow_fast_mode", False),
         ("chatgpt_fast_mode_allowed", False),
+        ("chatgpt_requested_reasoning_effort", "max"),
+        ("chatgpt_effective_reasoning_effort", "xhigh"),
+        ("chatgpt_reasoning_effort_action", "replace"),
+        ("chatgpt_reasoning_effort_policy_source", "virtual_key"),
+        ("chatgpt_reasoning_effort_policy_applied", True),
     ],
 )
 def test_get_standard_logging_metadata(metadata_key, metadata_value):

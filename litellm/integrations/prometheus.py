@@ -27,6 +27,9 @@ from litellm.litellm_core_utils.core_helpers import (
     get_metadata_variable_name_from_kwargs,
 )
 from litellm.llms.chatgpt.fast_mode_metrics import ChatGPTFastModeMetrics
+from litellm.llms.chatgpt.reasoning_effort_metrics import (
+    ChatGPTReasoningEffortMetrics,
+)
 from litellm.proxy._types import (
     LiteLLM_DeletedVerificationToken,
     LiteLLM_TeamTable,
@@ -81,6 +84,7 @@ class PrometheusLogger(CustomLogger):
             self._gauge_factory = self._create_metric_factory(Gauge)
             self._histogram_factory = self._create_metric_factory(Histogram)
             self.chatgpt_fast_mode_metrics = ChatGPTFastModeMetrics()
+            self.chatgpt_reasoning_effort_metrics = ChatGPTReasoningEffortMetrics()
 
             self.litellm_proxy_failed_requests_metric = self._counter_factory(
                 name="litellm_proxy_failed_requests_metric",
@@ -908,6 +912,90 @@ class PrometheusLogger(CustomLogger):
 
         return filtered_labels
 
+    def _observe_chatgpt_usage_metrics(
+        self,
+        *,
+        standard_logging_payload: StandardLoggingPayload,
+        litellm_params: Dict[str, Any],
+        metadata: Dict[str, Any],
+        model: str,
+        prompt_tokens: int,
+        output_tokens: int,
+        tokens_used: int,
+    ) -> None:
+        standard_metadata = standard_logging_payload.get("metadata") or {}
+        chatgpt_profile = (
+            metadata.get("chatgpt_auth_profile")
+            or standard_metadata.get("chatgpt_auth_profile")
+            or litellm_params.get("chatgpt_auth_profile")
+        )
+        requested_service_tier = metadata.get(
+            "chatgpt_requested_service_tier"
+        ) or standard_metadata.get("chatgpt_requested_service_tier")
+        effective_service_tier = metadata.get(
+            "chatgpt_effective_service_tier"
+        ) or standard_metadata.get("chatgpt_effective_service_tier")
+        requested_reasoning_effort = metadata.get(
+            "chatgpt_requested_reasoning_effort"
+        ) or standard_metadata.get("chatgpt_requested_reasoning_effort")
+        effective_reasoning_effort = metadata.get(
+            "chatgpt_effective_reasoning_effort"
+        ) or standard_metadata.get("chatgpt_effective_reasoning_effort")
+        reasoning_effort_action = metadata.get(
+            "chatgpt_reasoning_effort_action"
+        ) or standard_metadata.get("chatgpt_reasoning_effort_action")
+        virtual_key = metadata.get("user_api_key_alias") or standard_metadata.get(
+            "user_api_key_alias"
+        )
+        is_chatgpt_request = (
+            standard_logging_payload.get("custom_llm_provider") == "chatgpt"
+            or str(standard_logging_payload.get("model", "")).startswith("chatgpt/")
+            or str(model or "").startswith("chatgpt/")
+            or str(litellm_params.get("model", "")).startswith("chatgpt/")
+        )
+        if not is_chatgpt_request:
+            return
+
+        if chatgpt_profile:
+            model_id = standard_logging_payload.get("model_id") or (
+                (standard_metadata.get("model_info") or {}).get("id")
+            )
+            self.chatgpt_fast_mode_metrics.observe_usage(
+                model_name=str(standard_logging_payload["model_group"] or model or ""),
+                model_id=str(model_id or ""),
+                profile=str(chatgpt_profile),
+                requested_service_tier=requested_service_tier,
+                effective_service_tier=effective_service_tier,
+                prompt_tokens=int(prompt_tokens or 0),
+                completion_tokens=int(output_tokens or 0),
+                total_tokens=int(tokens_used or 0),
+                virtual_key=str(virtual_key or ""),
+            )
+
+        if requested_reasoning_effort is None:
+            return
+        reasoning_tokens: Optional[int] = None
+        usage_object = standard_metadata.get("usage_object")
+        if isinstance(usage_object, dict):
+            completion_details = usage_object.get(
+                "completion_tokens_details"
+            ) or usage_object.get("output_tokens_details")
+            if isinstance(completion_details, dict):
+                raw_reasoning_tokens = completion_details.get("reasoning_tokens")
+                if isinstance(raw_reasoning_tokens, (int, float)):
+                    reasoning_tokens = int(raw_reasoning_tokens)
+        self.chatgpt_reasoning_effort_metrics.observe_usage(
+            model=str(standard_logging_payload["model_group"] or model or ""),
+            virtual_key=str(virtual_key or ""),
+            requested_effort=str(requested_reasoning_effort),
+            effective_effort=str(effective_reasoning_effort or "default"),
+            action=str(reasoning_effort_action or "allow"),
+            prompt_tokens=int(prompt_tokens or 0),
+            completion_tokens=int(output_tokens or 0),
+            total_tokens=int(tokens_used or 0),
+            reasoning_tokens=reasoning_tokens,
+        )
+
     async def async_log_success_event(self, kwargs, response_obj, start_time, end_time):
         # Define prometheus client
         from litellm.types.utils import StandardLoggingPayload
@@ -970,43 +1058,15 @@ class PrometheusLogger(CustomLogger):
         else:
             _tags = []
 
-        standard_metadata = standard_logging_payload.get("metadata") or {}
-        chatgpt_profile = (
-            _metadata.get("chatgpt_auth_profile")
-            or standard_metadata.get("chatgpt_auth_profile")
-            or litellm_params.get("chatgpt_auth_profile")
+        self._observe_chatgpt_usage_metrics(
+            standard_logging_payload=standard_logging_payload,
+            litellm_params=litellm_params,
+            metadata=_metadata,
+            model=model,
+            prompt_tokens=prompt_tokens,
+            output_tokens=output_tokens,
+            tokens_used=tokens_used,
         )
-        requested_service_tier = _metadata.get(
-            "chatgpt_requested_service_tier"
-        ) or standard_metadata.get("chatgpt_requested_service_tier")
-        effective_service_tier = _metadata.get(
-            "chatgpt_effective_service_tier"
-        ) or standard_metadata.get("chatgpt_effective_service_tier")
-        chatgpt_virtual_key = (
-            _metadata.get("user_api_key_alias")
-            or standard_metadata.get("user_api_key_alias")
-        )
-        model_id = standard_logging_payload.get("model_id") or (
-            (standard_metadata.get("model_info") or {}).get("id")
-        )
-        is_chatgpt_request = (
-            standard_logging_payload.get("custom_llm_provider") == "chatgpt"
-            or str(standard_logging_payload.get("model", "")).startswith("chatgpt/")
-            or str(model or "").startswith("chatgpt/")
-            or str(litellm_params.get("model", "")).startswith("chatgpt/")
-        )
-        if chatgpt_profile and is_chatgpt_request:
-            self.chatgpt_fast_mode_metrics.observe_usage(
-                model_name=str(standard_logging_payload["model_group"] or model or ""),
-                model_id=str(model_id or ""),
-                profile=str(chatgpt_profile),
-                requested_service_tier=requested_service_tier,
-                effective_service_tier=effective_service_tier,
-                prompt_tokens=int(prompt_tokens or 0),
-                completion_tokens=int(output_tokens or 0),
-                total_tokens=int(tokens_used or 0),
-                virtual_key=str(chatgpt_virtual_key or ""),
-            )
 
         print_verbose(
             f"inside track_prometheus_metrics, model {model}, response_cost {response_cost}, tokens_used {tokens_used}, end_user_id {end_user_id}, user_api_key {user_api_key}"

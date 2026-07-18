@@ -25,6 +25,7 @@ CHATGPT_OAUTH_SCOPE = (
 
 DEFAULT_ORIGINATOR = "codex_cli_rs"
 DEFAULT_USER_AGENT = "codex_cli_rs/0.0.0 (Unknown 0; unknown) unknown"
+DEFAULT_CODEX_CLIENT_VERSION = "0.144.1"
 CHATGPT_FAST_SERVICE_TIER = "priority"
 CHATGPT_LEGACY_FAST_SERVICE_TIER = "fast"
 CHATGPT_DEFAULT_INSTRUCTIONS = """You are Codex, based on GPT-5. You are running as a coding agent in the Codex CLI on a user's computer.
@@ -209,13 +210,9 @@ def _terminal_user_agent() -> str:
     return "unknown"
 
 
-def _get_litellm_version() -> str:
-    try:
-        from importlib.metadata import version
-
-        return version("litellm")
-    except Exception:
-        return "0.0.0"
+def get_chatgpt_codex_client_version() -> str:
+    configured = os.getenv("CHATGPT_CODEX_CLIENT_VERSION", DEFAULT_CODEX_CLIENT_VERSION)
+    return _sanitize_user_agent_token(configured) or DEFAULT_CODEX_CLIENT_VERSION
 
 
 def get_chatgpt_originator() -> str:
@@ -223,11 +220,14 @@ def get_chatgpt_originator() -> str:
     return _safe_header_value(originator) or DEFAULT_ORIGINATOR
 
 
-def get_chatgpt_user_agent(originator: str) -> str:
+def get_chatgpt_user_agent(
+    originator: str, client_version: Optional[str] = None
+) -> str:
     override = os.getenv("CHATGPT_USER_AGENT")
     if override:
         return _safe_header_value(override) or DEFAULT_USER_AGENT
-    version = _get_litellm_version()
+    version = client_version or get_chatgpt_codex_client_version()
+    version = _sanitize_user_agent_token(version) or DEFAULT_CODEX_CLIENT_VERSION
     os_type = platform.system() or "Unknown"
     os_version = platform.release() or "0"
     arch = platform.machine() or "unknown"
@@ -244,21 +244,37 @@ def get_chatgpt_default_headers(
     access_token: str,
     account_id: Optional[str],
     session_id: Optional[str] = None,
+    user_agent: Optional[str] = None,
 ) -> dict:
     originator = get_chatgpt_originator()
-    user_agent = get_chatgpt_user_agent(originator)
+    resolved_user_agent = user_agent or get_chatgpt_user_agent(originator)
     headers = {
         "Authorization": f"Bearer {access_token}",
         "content-type": "application/json",
         "accept": "text/event-stream",
         "originator": originator,
-        "user-agent": user_agent,
+        "user-agent": resolved_user_agent,
     }
     if session_id:
         headers["session_id"] = session_id
     if account_id:
         headers["ChatGPT-Account-Id"] = account_id
     return headers
+
+
+def get_chatgpt_request_user_agent(litellm_params: Optional[Any]) -> Optional[str]:
+    params = _normalize_litellm_params(litellm_params)
+    candidates = [params, params.get("metadata"), params.get("litellm_metadata")]
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        user_agent = candidate.get("user_agent")
+        if not isinstance(user_agent, str):
+            continue
+        safe_user_agent = _safe_header_value(user_agent)
+        if safe_user_agent.startswith("codex_cli_rs/"):
+            return safe_user_agent
+    return None
 
 
 def normalize_chatgpt_service_tier(service_tier: Any) -> Any:

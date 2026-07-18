@@ -535,6 +535,34 @@ def test_string_cost_values_edge_cases():
     assert round(completion_cost, 12) == round(expected_completion_cost, 12)
 
 
+@pytest.mark.parametrize(
+    "model,input_cost,output_cost,cache_read_cost,cache_write_cost",
+    [
+        ("gpt-5.6", 5e-6, 3e-5, 5e-7, 6.25e-6),
+        ("gpt-5.6-sol", 5e-6, 3e-5, 5e-7, 6.25e-6),
+        ("gpt-5.6-terra", 2.5e-6, 1.5e-5, 2.5e-7, 3.125e-6),
+        ("gpt-5.6-luna", 1e-6, 6e-6, 1e-7, 1.25e-6),
+    ],
+)
+def test_generic_cost_per_token_gpt56(
+    model, input_cost, output_cost, cache_read_cost, cache_write_cost
+):
+    os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
+    litellm.model_cost = litellm.get_model_cost_map(url="")
+
+    model_cost_map = litellm.model_cost[model]
+
+    assert model_cost_map["input_cost_per_token"] == input_cost
+    assert model_cost_map["output_cost_per_token"] == output_cost
+    assert model_cost_map["cache_read_input_token_cost"] == cache_read_cost
+    assert model_cost_map["cache_creation_input_token_cost"] == cache_write_cost
+    assert model_cost_map["cache_creation_input_token_cost"] == pytest.approx(
+        input_cost * 1.25
+    )
+    assert model_cost_map["litellm_provider"] == "openai"
+    assert model_cost_map["mode"] == "chat"
+
+
 def test_string_cost_values_with_threshold():
     """Test that string cost values work correctly with threshold pricing."""
     from unittest.mock import patch
