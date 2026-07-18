@@ -228,6 +228,7 @@ RUN chmod 0755 /app/docker/entrypoint.sh /app/docker/prod_entrypoint.sh && \
     chmod 0644 /app/requirements.txt /app/schema.prisma \
         /app/litellm/proxy/prisma_migration.py /etc/supervisord.conf && \
     chmod -R a+rX /app /var/lib/litellm /usr/lib/python3.13/site-packages && \
+    chmod -R a+rwX /app/.cache && \
     UNREADABLE="$(find /app /var/lib/litellm /usr/lib/python3.13/site-packages \
         -type f ! -perm -0004 -print -quit)" && \
     [ -z "$UNREADABLE" ] || \
