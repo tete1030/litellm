@@ -1,5 +1,7 @@
 import base64
 import json
+import multiprocessing
+import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -40,6 +42,38 @@ def _write_auth_file(path: Path, data: dict) -> None:
     path.write_text(json.dumps(data))
 
 
+def _multiprocess_refresh_worker(
+    token_dir: str,
+    counter,
+    barrier,
+    result_queue,
+) -> None:
+    os.environ["CHATGPT_TOKEN_DIR"] = token_dir
+    os.environ["CHATGPT_AUTH_FILE"] = "auth.json"
+    os.environ["CHATGPT_AUTH_LOCK_TIMEOUT_SECONDS"] = "5"
+    os.environ.pop("CHATGPT_AUTH_READ_ONLY", None)
+    reset_chatgpt_authenticator_cache()
+    authenticator = Authenticator()
+
+    def _refresh_tokens_unlocked(refresh_token: str) -> dict:
+        with counter.get_lock():
+            counter.value += 1
+        time.sleep(0.1)
+        refreshed = {
+            "access_token": _make_jwt({"exp": int(time.time()) + 3600}),
+            "refresh_token": f"{refresh_token}-rotated",
+            "id_token": _make_jwt({"exp": int(time.time()) + 3600}),
+        }
+        authenticator._write_auth_file(authenticator._build_auth_record(refreshed))
+        return refreshed
+
+    authenticator._refresh_tokens_unlocked = (  # type: ignore[method-assign]
+        _refresh_tokens_unlocked
+    )
+    barrier.wait()
+    result_queue.put(authenticator.get_access_token(allow_interactive_login=False))
+
+
 @pytest.fixture(autouse=True)
 def _reset_chatgpt_auth_state(monkeypatch):
     litellm.chatgpt_auth_profiles = {}
@@ -49,6 +83,8 @@ def _reset_chatgpt_auth_state(monkeypatch):
         "CHATGPT_AUTH_FILE",
         "CHATGPT_AUTH_PROFILES",
         "CHATGPT_AUTH_PROFILES_JSON",
+        "CHATGPT_AUTH_LOCK_TIMEOUT_SECONDS",
+        "CHATGPT_AUTH_READ_ONLY",
     ):
         monkeypatch.delenv(env_var, raising=False)
     yield
@@ -78,15 +114,11 @@ class TestChatGPTAuthenticator:
             "account-b": {"auth_file": str(tmp_path / "account-b" / "custom.json")},
         }
 
-        auth_a = get_chatgpt_authenticator(
-            {"chatgpt_auth_profile": "account-a"}
-        )
+        auth_a = get_chatgpt_authenticator({"chatgpt_auth_profile": "account-a"})
         auth_a_again = get_chatgpt_authenticator(
             GenericLiteLLMParams(chatgpt_auth_profile="account-a")
         )
-        auth_b = get_chatgpt_authenticator(
-            {"chatgpt_auth_profile": "account-b"}
-        )
+        auth_b = get_chatgpt_authenticator({"chatgpt_auth_profile": "account-b"})
 
         assert auth_a is auth_a_again
         assert auth_a is not auth_b
@@ -122,17 +154,15 @@ class TestChatGPTAuthenticator:
     ):
         shared_dir = tmp_path / "shared"
         monkeypatch.setenv("CHATGPT_TOKEN_DIR", str(shared_dir))
-        litellm.chatgpt_auth_profiles = {
-            "account-a": {"token_dir": str(shared_dir)}
-        }
+        litellm.chatgpt_auth_profiles = {"account-a": {"token_dir": str(shared_dir)}}
 
-        with pytest.raises(
-            ChatGPTAuthProfileError, match="implicit default profile"
-        ):
+        with pytest.raises(ChatGPTAuthProfileError, match="implicit default profile"):
             resolve_chatgpt_auth_profile(profile_name="account-a")
 
     def test_unknown_profile_raises_actionable_error(self):
-        with pytest.raises(ChatGPTAuthProfileError, match="Unknown ChatGPT auth profile"):
+        with pytest.raises(
+            ChatGPTAuthProfileError, match="Unknown ChatGPT auth profile"
+        ):
             resolve_chatgpt_auth_profile(
                 litellm_params={"chatgpt_auth_profile": "missing-profile"}
             )
@@ -221,9 +251,7 @@ class TestChatGPTAuthenticator:
         litellm.chatgpt_auth_profiles = {
             "account-a": {"token_dir": str(tmp_path / "account-a")}
         }
-        authenticator = get_chatgpt_authenticator(
-            {"chatgpt_auth_profile": "account-a"}
-        )
+        authenticator = get_chatgpt_authenticator({"chatgpt_auth_profile": "account-a"})
         auth_path = Path(authenticator.auth_file)
         _write_auth_file(
             auth_path,
@@ -237,7 +265,7 @@ class TestChatGPTAuthenticator:
         refresh_call_count = 0
         refresh_count_lock = threading.Lock()
 
-        def _refresh_tokens(refresh_token: str):
+        def _refresh_tokens_unlocked(refresh_token: str):
             nonlocal refresh_call_count
             assert refresh_token == "refresh-123"
             with refresh_count_lock:
@@ -251,21 +279,161 @@ class TestChatGPTAuthenticator:
             authenticator._write_auth_file(authenticator._build_auth_record(refreshed))
             return refreshed
 
-        with patch.object(authenticator, "_refresh_tokens", side_effect=_refresh_tokens):
+        with patch.object(
+            authenticator,
+            "_refresh_tokens_unlocked",
+            side_effect=_refresh_tokens_unlocked,
+        ):
             with ThreadPoolExecutor(max_workers=2) as executor:
-                futures = [executor.submit(authenticator.get_access_token) for _ in range(2)]
+                futures = [
+                    executor.submit(authenticator.get_access_token) for _ in range(2)
+                ]
                 results = [future.result() for future in futures]
 
         assert results[0] == results[1]
         assert refresh_call_count == 1
 
+    @pytest.mark.skipif(
+        "fork" not in multiprocessing.get_all_start_methods(),
+        reason="cross-process file-lock test requires fork",
+    )
+    def test_same_profile_refresh_is_locked_across_processes(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv("CHATGPT_TOKEN_DIR", str(tmp_path))
+        auth_path = tmp_path / "auth.json"
+        _write_auth_file(
+            auth_path,
+            {
+                "access_token": "expired-token",
+                "refresh_token": "refresh-123",
+                "expires_at": time.time() - 10,
+            },
+        )
+        ctx = multiprocessing.get_context("fork")
+        counter = ctx.Value("i", 0)
+        barrier = ctx.Barrier(2)
+        result_queue = ctx.Queue()
+        processes = [
+            ctx.Process(
+                target=_multiprocess_refresh_worker,
+                args=(str(tmp_path), counter, barrier, result_queue),
+            )
+            for _ in range(2)
+        ]
+
+        for process in processes:
+            process.start()
+        for process in processes:
+            process.join(timeout=10)
+            assert process.exitcode == 0
+
+        results = [result_queue.get(timeout=1) for _ in processes]
+        saved_auth_data = json.loads(auth_path.read_text())
+        assert results[0] == results[1]
+        assert counter.value == 1
+        assert saved_auth_data["refresh_token"] == "refresh-123-rotated"
+
+    def test_read_only_profile_returns_valid_token_without_writes(
+        self, monkeypatch, tmp_path
+    ):
+        token = _make_jwt({"exp": int(time.time()) + 3600})
+        auth_path = tmp_path / "auth.json"
+        _write_auth_file(auth_path, {"access_token": token})
+        monkeypatch.setenv("CHATGPT_TOKEN_DIR", str(tmp_path))
+        monkeypatch.setenv("CHATGPT_AUTH_READ_ONLY", "true")
+
+        authenticator = Authenticator()
+
+        assert authenticator.get_access_token() == token
+        assert not Path(f"{auth_path}.lock").exists()
+        assert json.loads(auth_path.read_text()) == {"access_token": token}
+
+    def test_read_only_profile_rejects_expired_token_without_writes(
+        self, monkeypatch, tmp_path
+    ):
+        auth_path = tmp_path / "auth.json"
+        original = {
+            "access_token": "expired-token",
+            "refresh_token": "refresh-123",
+            "expires_at": time.time() - 10,
+        }
+        _write_auth_file(auth_path, original)
+        monkeypatch.setenv("CHATGPT_TOKEN_DIR", str(tmp_path))
+        monkeypatch.setenv("CHATGPT_AUTH_READ_ONLY", "true")
+
+        authenticator = Authenticator()
+
+        with pytest.raises(GetAccessTokenError, match="configured read-only"):
+            authenticator.get_access_token()
+        assert not Path(f"{auth_path}.lock").exists()
+        assert json.loads(auth_path.read_text()) == original
+
+    def test_noninteractive_refresh_failure_does_not_start_device_login(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv("CHATGPT_TOKEN_DIR", str(tmp_path))
+        authenticator = Authenticator()
+        _write_auth_file(
+            Path(authenticator.auth_file),
+            {
+                "access_token": "expired-token",
+                "refresh_token": "refresh-123",
+                "expires_at": time.time() - 10,
+            },
+        )
+        refresh_error = RefreshAccessTokenError(
+            status_code=401,
+            message="refresh failed",
+        )
+
+        with (
+            patch.object(
+                authenticator,
+                "_refresh_tokens_unlocked",
+                side_effect=refresh_error,
+            ),
+            patch.object(authenticator, "_login_device_code") as login,
+            pytest.raises(RefreshAccessTokenError, match="refresh failed"),
+        ):
+            authenticator.get_access_token(allow_interactive_login=False)
+
+        login.assert_not_called()
+
+    def test_direct_refresh_uses_latest_token_under_profile_lock(self, tmp_path):
+        litellm.chatgpt_auth_profiles = {
+            "account-a": {"token_dir": str(tmp_path / "account-a")}
+        }
+        authenticator = get_chatgpt_authenticator({"chatgpt_auth_profile": "account-a"})
+        _write_auth_file(
+            Path(authenticator.auth_file),
+            {
+                "access_token": "expired-token",
+                "refresh_token": "refresh-latest",
+                "expires_at": time.time() - 10,
+            },
+        )
+        refreshed = {
+            "access_token": "new-access-token",
+            "refresh_token": "refresh-rotated",
+            "id_token": "new-id-token",
+        }
+
+        with patch.object(
+            authenticator,
+            "_refresh_tokens_unlocked",
+            return_value=refreshed,
+        ) as refresh:
+            assert authenticator._refresh_tokens("refresh-stale") == refreshed
+
+        refresh.assert_called_once_with("refresh-latest")
+        assert Path(f"{authenticator.auth_file}.lock").exists()
+
     def test_refresh_token_error_includes_profile_name(self, tmp_path):
         litellm.chatgpt_auth_profiles = {
             "account-a": {"token_dir": str(tmp_path / "account-a")}
         }
-        authenticator = get_chatgpt_authenticator(
-            {"chatgpt_auth_profile": "account-a"}
-        )
+        authenticator = get_chatgpt_authenticator({"chatgpt_auth_profile": "account-a"})
         request = httpx.Request("POST", "https://auth.openai.com/oauth/token")
         response = httpx.Response(401, request=request)
         client = MagicMock()

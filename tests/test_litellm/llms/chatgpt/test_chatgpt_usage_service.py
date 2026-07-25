@@ -18,6 +18,19 @@ from litellm.llms.chatgpt.usage_service import (
 )
 
 
+def test_usage_access_token_uses_noninteractive_authenticator() -> None:
+    from litellm.llms.chatgpt.usage_service import _get_usage_access_token
+
+    authenticator = MagicMock()
+    authenticator.get_access_token.return_value = "token"
+
+    assert _get_usage_access_token(authenticator, {}) == "token"
+    authenticator.get_access_token.assert_called_once_with(
+        allow_refresh=True,
+        allow_interactive_login=False,
+    )
+
+
 def test_fetch_usage_for_profile_returns_error_result_on_auth_failure() -> None:
     authenticator = MagicMock()
     authenticator.get_account_id.return_value = "acct_buy4"

@@ -905,17 +905,9 @@ def _load_auth_data(profile: str) -> Tuple[Any, Dict[str, Any]]:
 
 
 def _get_usage_access_token(authenticator: Any, auth_data: Dict[str, Any]) -> str:
-    access_token = auth_data.get("access_token")
-    if access_token and not authenticator._is_token_expired(auth_data, access_token):
-        return access_token
-
-    refresh_token = auth_data.get("refresh_token")
-    if refresh_token:
-        refreshed = authenticator._refresh_tokens(refresh_token)
-        return refreshed["access_token"]
-
-    raise ValueError(
-        f"Profile '{authenticator.profile_name}' is not logged in. Run `litellm-chatgpt login {authenticator.profile_name}`."
+    return authenticator.get_access_token(
+        allow_refresh=True,
+        allow_interactive_login=False,
     )
 
 

@@ -5,11 +5,14 @@ import os
 import tempfile
 import threading
 import time
+from contextlib import contextmanager
 from urllib.parse import parse_qs, urlencode, urlparse
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterator, Optional
 
 import httpx
+from filelock import FileLock
+from filelock import Timeout as FileLockTimeout
 
 import litellm
 from litellm._logging import verbose_logger
@@ -33,6 +36,7 @@ from .common_utils import (
 )
 
 TOKEN_EXPIRY_SKEW_SECONDS = 60
+DEFAULT_AUTH_LOCK_TIMEOUT_SECONDS = 30.0
 DEVICE_CODE_TIMEOUT_SECONDS = 15 * 60
 DEVICE_CODE_COOLDOWN_SECONDS = 5 * 60
 DEVICE_CODE_POLL_SLEEP_SECONDS = 5
@@ -69,6 +73,13 @@ class BrowserLoginSession:
 
 def _normalize_path(path: str) -> str:
     return os.path.abspath(os.path.expanduser(path))
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _base64url_encode(data: bytes) -> str:
@@ -282,9 +293,7 @@ def normalize_chatgpt_auth_profiles(
         }
 
     if DEFAULT_CHATGPT_PROFILE_NAME not in normalized_profiles:
-        default_profile = _resolve_profile_definition(
-            DEFAULT_CHATGPT_PROFILE_NAME, {}
-        )
+        default_profile = _resolve_profile_definition(DEFAULT_CHATGPT_PROFILE_NAME, {})
         existing_profile = resolved_auth_files.get(default_profile.auth_file)
         if existing_profile is not None:
             raise ChatGPTAuthProfileError(
@@ -329,12 +338,25 @@ class Authenticator:
         profile_name: Optional[str] = None,
         profile: Optional[ResolvedChatGPTAuthProfile] = None,
     ) -> None:
-        self.profile = profile or resolve_chatgpt_auth_profile(profile_name=profile_name)
+        self.profile = profile or resolve_chatgpt_auth_profile(
+            profile_name=profile_name
+        )
         self.profile_name = self.profile.profile_name
         self.token_dir = self.profile.token_dir
         self.auth_file = self.profile.auth_file
         self._lock = _get_profile_lock(self.profile.cache_key)
-        self._ensure_token_dir()
+        self.read_only = _env_flag("CHATGPT_AUTH_READ_ONLY")
+        try:
+            self.auth_lock_timeout_seconds = float(
+                os.getenv(
+                    "CHATGPT_AUTH_LOCK_TIMEOUT_SECONDS",
+                    str(DEFAULT_AUTH_LOCK_TIMEOUT_SECONDS),
+                )
+            )
+        except ValueError:
+            self.auth_lock_timeout_seconds = DEFAULT_AUTH_LOCK_TIMEOUT_SECONDS
+        if not self.read_only:
+            self._ensure_token_dir()
 
     def get_api_base(self) -> str:
         return (
@@ -353,57 +375,120 @@ class Authenticator:
             return access_token
         return None
 
-    def get_access_token(self) -> str:
+    def get_access_token(
+        self,
+        *,
+        allow_refresh: bool = True,
+        allow_interactive_login: bool = True,
+    ) -> str:
         auth_data = self._read_auth_file()
         access_token = self._get_valid_access_token_from_auth_data(auth_data)
         if access_token:
             return access_token
 
-        with self._lock:
-            auth_data = self._read_auth_file()
-            access_token = self._get_valid_access_token_from_auth_data(auth_data)
-            if access_token:
-                return access_token
+        if self.read_only:
+            raise GetAccessTokenError(
+                status_code=503,
+                message=(
+                    f"ChatGPT auth profile '{self.profile_name}' has no valid access "
+                    "token and is configured read-only."
+                ),
+            )
 
-            refresh_token = auth_data.get("refresh_token") if auth_data else None
-            if refresh_token:
-                try:
-                    refreshed = self._refresh_tokens(refresh_token)
-                    return refreshed["access_token"]
-                except RefreshAccessTokenError as exc:
-                    verbose_logger.warning(
-                        "ChatGPT refresh token failed for profile '%s', re-login required: %s",
-                        self.profile_name,
-                        exc,
-                    )
+        refresh_error: Optional[RefreshAccessTokenError] = None
+        if allow_refresh:
+            try:
+                token = self._refresh_access_token_if_available()
+                if token:
+                    return token
+            except RefreshAccessTokenError as exc:
+                refresh_error = exc
+                verbose_logger.warning(
+                    "ChatGPT refresh token failed for profile '%s', re-login required: %s",
+                    self.profile_name,
+                    exc,
+                )
 
-            cooldown_remaining = self._get_device_code_cooldown_remaining(auth_data)
+        if not allow_interactive_login:
+            if refresh_error is not None:
+                raise refresh_error
+            raise GetAccessTokenError(
+                status_code=503,
+                message=(
+                    f"ChatGPT auth profile '{self.profile_name}' has no valid access "
+                    "token and interactive login is disabled."
+                ),
+            )
 
+        auth_data = self._read_auth_file()
+        cooldown_remaining = self._get_device_code_cooldown_remaining(auth_data)
         if cooldown_remaining > 0:
             token = self._wait_for_access_token(cooldown_remaining)
             if token:
                 return token
 
+        if allow_refresh:
+            try:
+                token = self._refresh_access_token_if_available()
+                if token:
+                    return token
+            except RefreshAccessTokenError as exc:
+                verbose_logger.warning(
+                    "ChatGPT refresh token failed for profile '%s', re-login required: %s",
+                    self.profile_name,
+                    exc,
+                )
+
         with self._lock:
             auth_data = self._read_auth_file()
             access_token = self._get_valid_access_token_from_auth_data(auth_data)
             if access_token:
                 return access_token
-
-            refresh_token = auth_data.get("refresh_token") if auth_data else None
-            if refresh_token:
-                try:
-                    refreshed = self._refresh_tokens(refresh_token)
-                    return refreshed["access_token"]
-                except RefreshAccessTokenError as exc:
-                    verbose_logger.warning(
-                        "ChatGPT refresh token failed for profile '%s', re-login required: %s",
-                        self.profile_name,
-                        exc,
-                    )
-
             tokens = self._login_device_code()
             return tokens["access_token"]
+
+    def _refresh_access_token_if_available(self) -> Optional[str]:
+        with self._lock:
+            with self._profile_file_lock():
+                auth_data = self._read_auth_file()
+                access_token = self._get_valid_access_token_from_auth_data(auth_data)
+                if access_token:
+                    return access_token
+
+                refresh_token = auth_data.get("refresh_token") if auth_data else None
+                if not refresh_token:
+                    return None
+                try:
+                    refreshed = self._refresh_tokens_unlocked(refresh_token)
+                    return refreshed["access_token"]
+                except RefreshAccessTokenError:
+                    raise
+
+    @contextmanager
+    def _profile_file_lock(self) -> Iterator[None]:
+        if self.read_only:
+            raise ChatGPTAuthProfileError(
+                status_code=503,
+                message=(
+                    f"ChatGPT auth profile '{self.profile_name}' is configured read-only."
+                ),
+            )
+        self._ensure_token_dir()
+        lock_path = f"{self.auth_file}.lock"
+        try:
+            with FileLock(
+                lock_path,
+                timeout=max(0.0, self.auth_lock_timeout_seconds),
+            ):
+                yield
+        except FileLockTimeout as exc:
+            raise ChatGPTAuthProfileError(
+                status_code=503,
+                message=(
+                    f"Timed out waiting for ChatGPT auth profile '{self.profile_name}' "
+                    f"lock after {self.auth_lock_timeout_seconds:g} seconds."
+                ),
+            ) from exc
 
     def get_account_id(self) -> Optional[str]:
         auth_data = self._read_auth_file()
@@ -416,13 +501,23 @@ class Authenticator:
         access_token = auth_data.get("access_token")
         derived = self._extract_account_id(id_token or access_token)
         if derived:
+            if self.read_only:
+                return derived
             with self._lock:
-                latest_auth_data = self._read_auth_file() or {}
-                if latest_auth_data.get("account_id"):
-                    return latest_auth_data["account_id"]
-                latest_auth_data["account_id"] = derived
-                self._write_auth_file(latest_auth_data)
-        return derived
+                with self._profile_file_lock():
+                    latest_auth_data = self._read_auth_file() or {}
+                    if latest_auth_data.get("account_id"):
+                        return latest_auth_data["account_id"]
+                    latest_derived = self._extract_account_id(
+                        latest_auth_data.get("id_token")
+                        or latest_auth_data.get("access_token")
+                    )
+                    if not latest_derived:
+                        return None
+                    latest_auth_data["account_id"] = latest_derived
+                    self._write_auth_file(latest_auth_data)
+                    return latest_derived
+        return None
 
     def _ensure_token_dir(self) -> None:
         try:
@@ -460,6 +555,13 @@ class Authenticator:
             ) from exc
 
     def _write_auth_file(self, data: Dict[str, Any]) -> None:
+        if self.read_only:
+            raise ChatGPTAuthProfileError(
+                status_code=503,
+                message=(
+                    f"ChatGPT auth profile '{self.profile_name}' is configured read-only."
+                ),
+            )
         auth_dir = os.path.dirname(self.auth_file) or self.token_dir
         self._ensure_token_dir()
         try:
@@ -505,12 +607,6 @@ class Authenticator:
         expires_at = auth_data.get("expires_at")
         if expires_at is None:
             expires_at = self._get_expires_at(access_token)
-            if expires_at:
-                auth_data["expires_at"] = expires_at
-                with self._lock:
-                    latest_auth_data = self._read_auth_file() or auth_data
-                    latest_auth_data["expires_at"] = expires_at
-                    self._write_auth_file(latest_auth_data)
         if expires_at is None:
             return True
         return time.time() >= float(expires_at) - TOKEN_EXPIRY_SKEW_SECONDS
@@ -602,11 +698,7 @@ class Authenticator:
             raise GetAccessTokenError(
                 message=(
                     f"Browser login failed: {error}"
-                    + (
-                        f" ({error_description})"
-                        if error_description
-                        else ""
-                    )
+                    + (f" ({error_description})" if error_description else "")
                 ),
                 status_code=400,
             )
@@ -631,7 +723,9 @@ class Authenticator:
             code_verifier=session.code_verifier,
         )
         auth_data = self._build_auth_record(tokens)
-        self._write_auth_file(auth_data)
+        with self._lock:
+            with self._profile_file_lock():
+                self._write_auth_file(auth_data)
         return tokens
 
     def _login_device_code(self) -> Dict[str, str]:
@@ -655,7 +749,8 @@ class Authenticator:
         auth_code = self._poll_for_authorization_code(device_code)
         tokens = self._exchange_code_for_tokens(auth_code)
         auth_data = self._build_auth_record(tokens)
-        self._write_auth_file(auth_data)
+        with self._profile_file_lock():
+            self._write_auth_file(auth_data)
         return tokens
 
     def _request_device_code(self) -> Dict[str, str]:
@@ -797,6 +892,24 @@ class Authenticator:
         )
 
     def _refresh_tokens(self, refresh_token: str) -> Dict[str, str]:
+        with self._lock:
+            with self._profile_file_lock():
+                auth_data = self._read_auth_file()
+                access_token = self._get_valid_access_token_from_auth_data(auth_data)
+                if access_token:
+                    return {
+                        "access_token": access_token,
+                        "refresh_token": str(
+                            (auth_data or {}).get("refresh_token") or refresh_token
+                        ),
+                        "id_token": str((auth_data or {}).get("id_token") or ""),
+                    }
+                latest_refresh_token = (auth_data or {}).get(
+                    "refresh_token"
+                ) or refresh_token
+                return self._refresh_tokens_unlocked(str(latest_refresh_token))
+
+    def _refresh_tokens_unlocked(self, refresh_token: str) -> Dict[str, str]:
         try:
             client = _get_httpx_client()
             resp = client.post(
@@ -872,9 +985,11 @@ class Authenticator:
         return max(0.0, remaining)
 
     def _record_device_code_request(self) -> None:
-        auth_data = self._read_auth_file() or {}
-        auth_data["device_code_requested_at"] = time.time()
-        self._write_auth_file(auth_data)
+        with self._lock:
+            with self._profile_file_lock():
+                auth_data = self._read_auth_file() or {}
+                auth_data["device_code_requested_at"] = time.time()
+                self._write_auth_file(auth_data)
 
     def _wait_for_access_token(self, timeout_seconds: float) -> Optional[str]:
         deadline = time.time() + timeout_seconds
