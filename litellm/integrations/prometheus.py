@@ -102,6 +102,35 @@ class PrometheusLogger(CustomLogger):
                 ),
             )
 
+            self.litellm_proxy_client_request_body_bytes = self._counter_factory(
+                name="litellm_proxy_client_request_body_bytes",
+                documentation="HTTP request body bytes received by the LiteLLM proxy",
+                labelnames=self.get_labels_for_metric(
+                    "litellm_proxy_client_request_body_bytes"
+                ),
+            )
+            self.litellm_proxy_client_response_body_bytes = self._counter_factory(
+                name="litellm_proxy_client_response_body_bytes",
+                documentation="HTTP response body bytes sent by the LiteLLM proxy",
+                labelnames=self.get_labels_for_metric(
+                    "litellm_proxy_client_response_body_bytes"
+                ),
+            )
+            self.litellm_provider_request_body_bytes = self._counter_factory(
+                name="litellm_provider_request_body_bytes",
+                documentation="HTTP request body bytes sent from LiteLLM to a provider",
+                labelnames=self.get_labels_for_metric(
+                    "litellm_provider_request_body_bytes"
+                ),
+            )
+            self.litellm_provider_response_body_bytes = self._counter_factory(
+                name="litellm_provider_response_body_bytes",
+                documentation="HTTP response body bytes received by LiteLLM from a provider",
+                labelnames=self.get_labels_for_metric(
+                    "litellm_provider_response_body_bytes"
+                ),
+            )
+
             # request latency metrics
             self.litellm_request_total_latency_metric = self._histogram_factory(
                 "litellm_request_total_latency_metric",
@@ -164,25 +193,33 @@ class PrometheusLogger(CustomLogger):
             self.litellm_prompt_cache_hit_requests_metric = self._counter_factory(
                 "litellm_prompt_cache_hit_requests_metric",
                 "Total prompt-bearing requests with provider-reported cached input tokens",
-                labelnames=self.get_labels_for_metric("litellm_prompt_cache_hit_requests_metric"),
+                labelnames=self.get_labels_for_metric(
+                    "litellm_prompt_cache_hit_requests_metric"
+                ),
             )
 
             self.litellm_prompt_cache_miss_requests_metric = self._counter_factory(
                 "litellm_prompt_cache_miss_requests_metric",
                 "Total prompt-bearing requests without provider-reported cached input tokens",
-                labelnames=self.get_labels_for_metric("litellm_prompt_cache_miss_requests_metric"),
+                labelnames=self.get_labels_for_metric(
+                    "litellm_prompt_cache_miss_requests_metric"
+                ),
             )
 
             self.litellm_prompt_cached_input_tokens_metric = self._counter_factory(
                 "litellm_prompt_cached_input_tokens_metric",
                 "Total provider-reported cached input tokens",
-                labelnames=self.get_labels_for_metric("litellm_prompt_cached_input_tokens_metric"),
+                labelnames=self.get_labels_for_metric(
+                    "litellm_prompt_cached_input_tokens_metric"
+                ),
             )
 
             self.litellm_prompt_uncached_input_tokens_metric = self._counter_factory(
                 "litellm_prompt_uncached_input_tokens_metric",
                 "Total input tokens not served from provider prompt cache",
-                labelnames=self.get_labels_for_metric("litellm_prompt_uncached_input_tokens_metric"),
+                labelnames=self.get_labels_for_metric(
+                    "litellm_prompt_uncached_input_tokens_metric"
+                ),
             )
 
             # Remaining Budget for Team
@@ -996,6 +1033,100 @@ class PrometheusLogger(CustomLogger):
             reasoning_tokens=reasoning_tokens,
         )
 
+    def observe_client_body_bytes(
+        self,
+        *,
+        hashed_api_key: Optional[str],
+        api_key_alias: Optional[str],
+        requested_model: Optional[str],
+        route: Optional[str],
+        status_code: Optional[int],
+        stream: Optional[bool],
+        request_body_bytes: int,
+        response_body_bytes: int,
+    ) -> None:
+        """Record application-body bytes at LiteLLM's client-facing boundary."""
+        enum_values = UserAPIKeyLabelValues(
+            hashed_api_key=hashed_api_key,
+            api_key_alias=api_key_alias,
+            requested_model=requested_model,
+            route=route,
+            status_code=str(status_code) if status_code is not None else None,
+            stream=str(stream) if stream is not None else None,
+        )
+        self._increment_traffic_counter(
+            metric_name="litellm_proxy_client_request_body_bytes",
+            metric=self.litellm_proxy_client_request_body_bytes,
+            enum_values=enum_values,
+            value=request_body_bytes,
+        )
+        self._increment_traffic_counter(
+            metric_name="litellm_proxy_client_response_body_bytes",
+            metric=self.litellm_proxy_client_response_body_bytes,
+            enum_values=enum_values,
+            value=response_body_bytes,
+        )
+
+    def observe_provider_body_bytes(
+        self,
+        *,
+        hashed_api_key: Optional[str],
+        api_key_alias: Optional[str],
+        requested_model: Optional[str],
+        route: Optional[str],
+        model: Optional[str],
+        model_id: Optional[str],
+        api_provider: Optional[str],
+        chatgpt_auth_profile: Optional[str],
+        status_code: Optional[int],
+        attempt: int,
+        stream: bool,
+        request_body_bytes: int,
+        response_body_bytes: int,
+    ) -> None:
+        """Record application-body bytes at the provider HTTP boundary."""
+        enum_values = UserAPIKeyLabelValues(
+            hashed_api_key=hashed_api_key,
+            api_key_alias=api_key_alias,
+            requested_model=requested_model,
+            route=route,
+            model=model,
+            model_id=model_id,
+            api_provider=api_provider,
+            chatgpt_auth_profile=chatgpt_auth_profile,
+            status_code=str(status_code) if status_code is not None else None,
+            attempt=str(attempt),
+            stream=str(stream),
+        )
+        self._increment_traffic_counter(
+            metric_name="litellm_provider_request_body_bytes",
+            metric=self.litellm_provider_request_body_bytes,
+            enum_values=enum_values,
+            value=request_body_bytes,
+        )
+        self._increment_traffic_counter(
+            metric_name="litellm_provider_response_body_bytes",
+            metric=self.litellm_provider_response_body_bytes,
+            enum_values=enum_values,
+            value=response_body_bytes,
+        )
+
+    def _increment_traffic_counter(
+        self,
+        *,
+        metric_name: DEFINED_PROMETHEUS_METRICS,
+        metric: Any,
+        enum_values: UserAPIKeyLabelValues,
+        value: int,
+    ) -> None:
+        if value <= 0:
+            return
+        labels = prometheus_label_factory(
+            supported_enum_labels=self.get_labels_for_metric(metric_name),
+            enum_values=enum_values,
+        )
+        metric.labels(**labels).inc(value)
+
     async def async_log_success_event(self, kwargs, response_obj, start_time, end_time):
         # Define prometheus client
         from litellm.types.utils import StandardLoggingPayload
@@ -1273,7 +1404,9 @@ class PrometheusLogger(CustomLogger):
                 usage_object = metadata.get("usage_object")
 
         prompt_tokens = standard_logging_payload.get("prompt_tokens", 0) or 0
-        if not isinstance(prompt_tokens, (int, float)) and isinstance(usage_object, dict):
+        if not isinstance(prompt_tokens, (int, float)) and isinstance(
+            usage_object, dict
+        ):
             prompt_tokens = (
                 usage_object.get("prompt_tokens")
                 or usage_object.get("input_tokens")
@@ -1313,7 +1446,11 @@ class PrometheusLogger(CustomLogger):
         standard_logging_payload: StandardLoggingPayload,
         enum_values: UserAPIKeyLabelValues,
     ) -> None:
-        prompt_tokens, cached_tokens, uncached_tokens = self._extract_prompt_cache_usage(
+        (
+            prompt_tokens,
+            cached_tokens,
+            uncached_tokens,
+        ) = self._extract_prompt_cache_usage(
             standard_logging_payload=standard_logging_payload
         )
         if prompt_tokens <= 0:

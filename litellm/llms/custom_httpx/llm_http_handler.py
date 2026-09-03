@@ -172,6 +172,7 @@ class BaseLLMHTTPHandler:
         response: Optional[httpx.Response] = None
         for i in range(max(max_retry_on_unprocessable_entity_error, 1)):
             try:
+                logging_obj.model_call_details["traffic_provider_attempt"] = i + 1
                 response = await async_httpx_client.post(
                     url=api_base,
                     headers=headers,
@@ -232,6 +233,7 @@ class BaseLLMHTTPHandler:
 
         for i in range(max(max_retry_on_unprocessable_entity_error, 1)):
             try:
+                logging_obj.model_call_details["traffic_provider_attempt"] = i + 1
                 response = sync_httpx_client.post(
                     url=api_base,
                     headers=headers,

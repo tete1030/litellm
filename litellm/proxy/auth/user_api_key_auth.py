@@ -64,6 +64,7 @@ from litellm.proxy.common_utils.http_parsing_utils import (
     populate_request_with_path_params,
 )
 from litellm.proxy.common_utils.realtime_utils import _realtime_request_body
+from litellm.proxy.middleware.traffic_metrics import set_request_traffic_identity
 from litellm.proxy.utils import (
     PrismaClient,
     ProxyLogging,
@@ -1563,6 +1564,22 @@ async def user_api_key_auth(
         user_api_key_auth_obj.end_user_id = end_user_id
 
     user_api_key_auth_obj.request_route = normalize_request_route(route)
+    set_request_traffic_identity(
+        request=request,
+        hashed_api_key=user_api_key_auth_obj.api_key,
+        api_key_alias=user_api_key_auth_obj.key_alias,
+        route=user_api_key_auth_obj.request_route,
+        requested_model=(
+            str(request_data.get("model"))
+            if isinstance(request_data, dict) and request_data.get("model") is not None
+            else None
+        ),
+        stream=(
+            bool(request_data.get("stream"))
+            if isinstance(request_data, dict) and "stream" in request_data
+            else None
+        ),
+    )
     return user_api_key_auth_obj
 
 

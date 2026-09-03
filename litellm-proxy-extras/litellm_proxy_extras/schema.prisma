@@ -678,6 +678,31 @@ model LiteLLM_DailyUserSpend {
   @@index([endpoint])
 }
 
+// Lean, durable traffic totals. This intentionally stores only aggregates,
+// never request or response payloads.
+model LiteLLM_DailyTraffic {
+  id                           String   @id @default(uuid())
+  date                         String
+  api_key                      String
+  api_key_alias                String   @default("")
+  route                        String
+  requested_model              String
+  client_request_body_bytes    BigInt   @default(0)
+  client_response_body_bytes   BigInt   @default(0)
+  provider_request_body_bytes  BigInt   @default(0)
+  provider_response_body_bytes BigInt   @default(0)
+  client_requests              BigInt   @default(0)
+  provider_attempts            BigInt   @default(0)
+  created_at                   DateTime @default(now())
+  updated_at                   DateTime @updatedAt
+
+  @@unique([date, api_key, route, requested_model])
+  @@index([date])
+  @@index([api_key, date])
+  @@index([api_key_alias, date])
+  @@index([route, date])
+}
+
 // Track daily organization spend metrics per model and key
 model LiteLLM_DailyOrganizationSpend {
   id                  String   @id @default(uuid())

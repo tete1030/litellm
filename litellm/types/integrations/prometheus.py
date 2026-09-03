@@ -185,6 +185,8 @@ class UserAPIKeyLabelNames(Enum):
     USER_AGENT = "user_agent"
     CALLBACK_NAME = "callback_name"
     STREAM = "stream"
+    CHATGPT_AUTH_PROFILE = "chatgpt_auth_profile"
+    ATTEMPT = "attempt"
 
 
 DEFINED_PROMETHEUS_METRICS = Literal[
@@ -196,6 +198,10 @@ DEFINED_PROMETHEUS_METRICS = Literal[
     "litellm_remaining_tokens_metric",
     "litellm_proxy_total_requests_metric",
     "litellm_proxy_failed_requests_metric",
+    "litellm_proxy_client_request_body_bytes",
+    "litellm_proxy_client_response_body_bytes",
+    "litellm_provider_request_body_bytes",
+    "litellm_provider_response_body_bytes",
     "litellm_deployment_latency_per_output_token",
     "litellm_requests_metric",
     "litellm_spend_metric",
@@ -333,6 +339,35 @@ class PrometheusMetricLabels:
         UserAPIKeyLabelNames.MODEL_ID.value,
     ]
 
+    # Byte counters track HTTP application bodies only. They intentionally do
+    # not include headers or TLS framing, which must be measured at the edge.
+    litellm_proxy_client_request_body_bytes = [
+        UserAPIKeyLabelNames.API_KEY_HASH.value,
+        UserAPIKeyLabelNames.API_KEY_ALIAS.value,
+        UserAPIKeyLabelNames.REQUESTED_MODEL.value,
+        UserAPIKeyLabelNames.ROUTE.value,
+        UserAPIKeyLabelNames.STATUS_CODE.value,
+        UserAPIKeyLabelNames.STREAM.value,
+    ]
+
+    litellm_proxy_client_response_body_bytes = litellm_proxy_client_request_body_bytes
+
+    litellm_provider_request_body_bytes = [
+        UserAPIKeyLabelNames.API_KEY_HASH.value,
+        UserAPIKeyLabelNames.API_KEY_ALIAS.value,
+        UserAPIKeyLabelNames.REQUESTED_MODEL.value,
+        UserAPIKeyLabelNames.ROUTE.value,
+        UserAPIKeyLabelNames.v1_LITELLM_MODEL_NAME.value,
+        UserAPIKeyLabelNames.MODEL_ID.value,
+        UserAPIKeyLabelNames.API_PROVIDER.value,
+        UserAPIKeyLabelNames.CHATGPT_AUTH_PROFILE.value,
+        UserAPIKeyLabelNames.STATUS_CODE.value,
+        UserAPIKeyLabelNames.ATTEMPT.value,
+        UserAPIKeyLabelNames.STREAM.value,
+    ]
+
+    litellm_provider_response_body_bytes = litellm_provider_request_body_bytes
+
     litellm_deployment_latency_per_output_token = [
         UserAPIKeyLabelNames.v2_LITELLM_MODEL_NAME.value,
         UserAPIKeyLabelNames.MODEL_ID.value,
@@ -412,6 +447,7 @@ class PrometheusMetricLabels:
         UserAPIKeyLabelNames.USER.value,
         UserAPIKeyLabelNames.USER_EMAIL.value,
         UserAPIKeyLabelNames.REQUESTED_MODEL.value,
+        UserAPIKeyLabelNames.ROUTE.value,
         UserAPIKeyLabelNames.MODEL_ID.value,
     ]
 
@@ -425,6 +461,7 @@ class PrometheusMetricLabels:
         UserAPIKeyLabelNames.USER.value,
         UserAPIKeyLabelNames.USER_EMAIL.value,
         UserAPIKeyLabelNames.REQUESTED_MODEL.value,
+        UserAPIKeyLabelNames.ROUTE.value,
         UserAPIKeyLabelNames.MODEL_ID.value,
     ]
 
@@ -438,6 +475,7 @@ class PrometheusMetricLabels:
         UserAPIKeyLabelNames.USER.value,
         UserAPIKeyLabelNames.USER_EMAIL.value,
         UserAPIKeyLabelNames.REQUESTED_MODEL.value,
+        UserAPIKeyLabelNames.ROUTE.value,
         UserAPIKeyLabelNames.MODEL_ID.value,
     ]
 
@@ -729,6 +767,12 @@ class UserAPIKeyLabelValues(BaseModel):
     ] = None
     user_agent: Annotated[
         Optional[str], Field(..., alias=UserAPIKeyLabelNames.USER_AGENT.value)
+    ] = None
+    chatgpt_auth_profile: Annotated[
+        Optional[str], Field(..., alias=UserAPIKeyLabelNames.CHATGPT_AUTH_PROFILE.value)
+    ] = None
+    attempt: Annotated[
+        Optional[str], Field(..., alias=UserAPIKeyLabelNames.ATTEMPT.value)
     ] = None
     stream: Annotated[
         Optional[str], Field(..., alias=UserAPIKeyLabelNames.STREAM.value)

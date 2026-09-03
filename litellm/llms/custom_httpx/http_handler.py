@@ -33,6 +33,10 @@ from litellm.constants import (
     DEFAULT_SSL_CIPHERS,
 )
 from litellm.litellm_core_utils.logging_utils import track_llm_api_timing
+from litellm.proxy.middleware.traffic_metrics import (
+    ProviderTrafficObserver,
+    create_chatgpt_provider_traffic_observer,
+)
 from litellm.types.llms.custom_http import *
 
 if TYPE_CHECKING:
@@ -445,6 +449,9 @@ class AsyncHTTPHandler:
         content: Any = None,
     ):
         start_time = time.time()
+        traffic_observer = create_chatgpt_provider_traffic_observer(
+            logging_obj, stream=stream
+        )
         try:
             if timeout is None:
                 timeout = self.timeout
@@ -465,7 +472,11 @@ class AsyncHTTPHandler:
                 files=files,
                 content=request_content,
             )
+            if traffic_observer is not None:
+                traffic_observer.record_request_body(req.content)
             response = await self.client.send(req, stream=stream)
+            if traffic_observer is not None:
+                traffic_observer.wrap_async_response(response, stream=stream)
             response.raise_for_status()
             return response
         except (httpx.RemoteProtocolError, httpx.ConnectError):
@@ -482,6 +493,7 @@ class AsyncHTTPHandler:
                     params=params,
                     headers=headers,
                     stream=stream,
+                    traffic_observer=traffic_observer,
                 )
             finally:
                 await new_client.aclose()
@@ -494,12 +506,15 @@ class AsyncHTTPHandler:
                 for key, value in error_response.headers.items():
                     headers["response_headers-{}".format(key)] = value
 
-            raise litellm.Timeout(
+            timeout_error = litellm.Timeout(
                 message=f"Connection timed out. Timeout passed={timeout}, time taken={time_delta} seconds",
                 model="default-model-name",
                 llm_provider="litellm-httpx-handler",
                 headers=headers,
             )
+            if traffic_observer is not None:
+                traffic_observer.record_error(timeout_error)
+            raise timeout_error
         except httpx.HTTPStatusError as e:
             if stream is True:
                 setattr(e, "message", await e.response.aread())
@@ -510,8 +525,12 @@ class AsyncHTTPHandler:
 
             setattr(e, "status_code", e.response.status_code)
 
+            if traffic_observer is not None:
+                traffic_observer.record_error(e)
             raise e
         except Exception as e:
+            if traffic_observer is not None:
+                traffic_observer.record_error(e)
             raise e
 
     async def put(
@@ -709,6 +728,7 @@ class AsyncHTTPHandler:
         headers: Optional[dict] = None,
         stream: bool = False,
         content: Any = None,
+        traffic_observer: Optional[ProviderTrafficObserver] = None,
     ):
         """
         Making POST request for a single connection client.
@@ -721,9 +741,18 @@ class AsyncHTTPHandler:
         req = client.build_request(
             "POST", url, data=request_data, json=json, params=params, headers=headers, content=request_content  # type: ignore
         )
-        response = await client.send(req, stream=stream)
-        response.raise_for_status()
-        return response
+        try:
+            if traffic_observer is not None:
+                traffic_observer.record_request_body(req.content)
+            response = await client.send(req, stream=stream)
+            if traffic_observer is not None:
+                traffic_observer.wrap_async_response(response, stream=stream)
+            response.raise_for_status()
+            return response
+        except Exception as e:
+            if traffic_observer is not None:
+                traffic_observer.record_error(e)
+            raise
 
     def __del__(self) -> None:
         try:
@@ -1003,6 +1032,9 @@ class HTTPHandler:
         content: Any = None,
         logging_obj: Optional[LiteLLMLoggingObject] = None,
     ):
+        traffic_observer = create_chatgpt_provider_traffic_observer(
+            logging_obj, stream=stream
+        )
         try:
             # Prepare data/content parameters to prevent httpx DeprecationWarning (memory leak fix)
             request_data, request_content = _prepare_request_data_and_content(
@@ -1025,15 +1057,22 @@ class HTTPHandler:
                 req = self.client.build_request(
                     "POST", url, data=request_data, json=json, params=params, headers=headers, files=files, content=request_content  # type: ignore
                 )
+            if traffic_observer is not None:
+                traffic_observer.record_request_body(req.content)
             response = self.client.send(req, stream=stream)
+            if traffic_observer is not None:
+                traffic_observer.wrap_sync_response(response, stream=stream)
             response.raise_for_status()
             return response
         except httpx.TimeoutException:
-            raise litellm.Timeout(
+            timeout_error = litellm.Timeout(
                 message=f"Connection timed out after {timeout} seconds.",
                 model="default-model-name",
                 llm_provider="litellm-httpx-handler",
             )
+            if traffic_observer is not None:
+                traffic_observer.record_error(timeout_error)
+            raise timeout_error
         except httpx.HTTPStatusError as e:
             if stream is True:
                 setattr(e, "message", mask_sensitive_info(e.response.read()))
@@ -1044,8 +1083,12 @@ class HTTPHandler:
                 setattr(e, "text", error_text)
 
             setattr(e, "status_code", e.response.status_code)
+            if traffic_observer is not None:
+                traffic_observer.record_error(e)
             raise e
         except Exception as e:
+            if traffic_observer is not None:
+                traffic_observer.record_error(e)
             raise e
 
     def patch(
